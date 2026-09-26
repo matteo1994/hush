@@ -83,12 +83,12 @@ fn handle_connection(mut client: TcpStream, table: PlaceholderTable) -> Result<(
 
     substitute_placeholders(&mut out_headers, &target_host, &table);
 
-    let mut request_line = format!("{} {} HTTP/1.1\r\n", method, upstream_path);
+    let mut request_line = format!("{method} {upstream_path} HTTP/1.1\r\n");
     for (k, v) in &out_headers {
         if k.eq_ignore_ascii_case("proxy-connection") {
             continue;
         }
-        request_line.push_str(&format!("{}: {}\r\n", k, v));
+        request_line.push_str(&format!("{k}: {v}\r\n"));
     }
     request_line.push_str("\r\n");
 

@@ -181,7 +181,7 @@ fn handle_request(req: Request, state: &Arc<AgentState>) -> Response {
 fn generate_placeholder() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
     format!("hush_ph_{hex}")
 }
 

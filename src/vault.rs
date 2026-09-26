@@ -59,7 +59,7 @@ impl Vault {
 }
 
 pub fn config_dir() -> Result<PathBuf> {
-    let base = dirs::home_dir().context("could not determine home directory")?;
+    let base = std::env::home_dir().context("could not determine home directory")?;
     Ok(base.join(".config").join("hush"))
 }
 
