@@ -219,11 +219,10 @@ fn find_managed_keys() -> Result<Vec<String>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((key, _)) = line.split_once('=') {
-            let key = key.trim();
-            if key.ends_with("_KEY") {
-                names.push(key.to_string());
-            }
+        if let Some((key, _)) = line.split_once('=')
+            && key.trim().ends_with("_KEY")
+        {
+            names.push(key.trim().to_string());
         }
     }
     Ok(names)
