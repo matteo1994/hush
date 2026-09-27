@@ -2,6 +2,7 @@ mod agent;
 mod client;
 mod protocol;
 mod proxy;
+mod tls;
 mod vault;
 
 use std::collections::HashMap;
@@ -187,8 +188,19 @@ fn cmd_run(env: Option<String>, cmd: Vec<String>) -> Result<ExitCode> {
                     child_env.insert(name, placeholder);
                 }
                 let proxy_url = format!("http://127.0.0.1:{proxy_port}");
-                child_env.insert("HTTP_PROXY".to_string(), proxy_url.clone());
-                child_env.insert("http_proxy".to_string(), proxy_url);
+                for var in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+                    child_env.insert(var.to_string(), proxy_url.clone());
+                }
+                // Trust the session CA for intercepted hosts. These variables
+                // replace the default roots, so they get system roots + CA.
+                let bundle = vault::ca_bundle_path()?.display().to_string();
+                for var in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"] {
+                    child_env.insert(var.to_string(), bundle.clone());
+                }
+                // Node appends to its roots instead, and only honors proxy
+                // env vars when asked to.
+                child_env.insert("NODE_EXTRA_CA_CERTS".to_string(), vault::ca_cert_path()?.display().to_string());
+                child_env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
             }
             protocol::Response::Error { message } => bail!(message),
             _ => {}

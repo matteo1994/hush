@@ -71,6 +71,14 @@ pub fn socket_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("agent.sock"))
 }
 
+pub fn ca_cert_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("ca.pem"))
+}
+
+pub fn ca_bundle_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("ca-bundle.pem"))
+}
+
 pub fn vault_exists() -> Result<bool> {
     Ok(vault_path()?.exists())
 }
