@@ -64,6 +64,21 @@ impl Mitm {
             return Ok(cfg.clone());
         }
 
+        let (cert, key_der) = self.issue_leaf(host)?;
+        let chain = vec![cert, self.ca.der().clone()];
+        let mut cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(chain, key_der)?;
+        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+
+        let cfg = Arc::new(cfg);
+        leaves.insert(host.to_string(), cfg.clone());
+        Ok(cfg)
+    }
+}
+
+impl Mitm {
+    fn issue_leaf(&self, host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let mut params = CertificateParams::new(vec![host.to_string()])?;
         params.distinguished_name.push(DnType::CommonName, host);
         params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
@@ -73,17 +88,8 @@ impl Mitm {
         set_validity(&mut params);
         let key = KeyPair::generate()?;
         let cert = params.signed_by(&key, &self.ca)?;
-
-        let chain = vec![cert.der().clone(), self.ca.der().clone()];
         let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der()));
-        let mut cfg = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(chain, key_der)?;
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
-
-        let cfg = Arc::new(cfg);
-        leaves.insert(host.to_string(), cfg.clone());
-        Ok(cfg)
+        Ok((cert.der().clone(), key_der))
     }
 }
 
@@ -130,4 +136,66 @@ fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
     fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use x509_parser::extensions::{GeneralName, ParsedExtension};
+    use x509_parser::parse_x509_certificate;
+
+    use super::*;
+
+    fn mitm() -> Mitm {
+        Mitm::new(RootCertStore::empty()).unwrap()
+    }
+
+    #[test]
+    fn session_ca_is_a_ca_limited_to_leaves() {
+        let m = mitm();
+        let (_, ca) = parse_x509_certificate(m.ca_der()).unwrap();
+        let bc = ca.basic_constraints().unwrap().expect("basic constraints").value;
+        assert!(bc.ca);
+        assert_eq!(bc.path_len_constraint, Some(0));
+        assert!(ca.key_usage().unwrap().expect("key usage").value.key_cert_sign());
+    }
+
+    /// Guards the fields strict clients check: a missing AKI broke Python 3.13+,
+    /// and Apple rejects leaves valid for more than 398 days.
+    #[test]
+    fn leaf_meets_strict_client_requirements() {
+        let m = mitm();
+        let (der, _) = m.issue_leaf("api.example.com").unwrap();
+        let (_, leaf) = parse_x509_certificate(&der).unwrap();
+        let (_, ca) = parse_x509_certificate(m.ca_der()).unwrap();
+
+        assert_eq!(leaf.issuer(), ca.subject());
+        assert!(!leaf.is_ca());
+        assert!(
+            leaf.extensions()
+                .iter()
+                .any(|e| matches!(e.parsed_extension(), ParsedExtension::AuthorityKeyIdentifier(_))),
+            "leaf must carry an Authority Key Identifier"
+        );
+        assert!(leaf.extended_key_usage().unwrap().expect("EKU").value.server_auth);
+        let san = leaf.subject_alternative_name().unwrap().expect("SAN").value;
+        assert_eq!(san.general_names, vec![GeneralName::DNSName("api.example.com")]);
+
+        let v = leaf.validity();
+        let days = (v.not_after.timestamp() - v.not_before.timestamp()) / 86_400;
+        assert!(days <= 398, "leaf valid for {days} days");
+        assert!(v.is_valid(), "leaf must be valid now");
+    }
+
+    #[test]
+    fn leaf_configs_are_cached_per_host() {
+        let m = mitm();
+        let a = m.server_config("a.example.com").unwrap();
+        assert!(Arc::ptr_eq(&a, &m.server_config("a.example.com").unwrap()));
+        assert!(!Arc::ptr_eq(&a, &m.server_config("b.example.com").unwrap()));
+    }
+
+    #[test]
+    fn each_session_gets_a_fresh_ca() {
+        assert_ne!(mitm().ca_der(), mitm().ca_der());
+    }
 }

@@ -696,6 +696,7 @@ dependencies = [
  "serde",
  "serde_json",
  "time",
+ "x509-parser",
 ]
 
 [[package]]

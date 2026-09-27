@@ -441,9 +441,16 @@ mod tests {
         assert_eq!(split_host_port("[::1]", 443), ("::1".into(), 443));
     }
 
-    /// A TLS upstream for `localhost` that answers one request by echoing back
-    /// its Authorization header and raw body.
-    fn spawn_upstream() -> (u16, CertificateDer<'static>) {
+    /// A one-shot upstream for `localhost`, plain or TLS. It answers a single
+    /// request by echoing back the raw head and body it received, and reports
+    /// the same through `received` — or `None` if no request ever arrived.
+    struct Upstream {
+        port: u16,
+        cert: CertificateDer<'static>,
+        received: std::sync::mpsc::Receiver<Option<String>>,
+    }
+
+    fn spawn_upstream(tls: bool) -> Upstream {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
             .unwrap()
@@ -462,80 +469,196 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (tx, received) = std::sync::mpsc::channel();
         thread::spawn(move || {
             let (tcp, _) = listener.accept().unwrap();
-            let mut tls = StreamOwned::new(ServerConnection::new(cfg).unwrap(), tcp);
-            let (head, leftover) = read_head(&mut tls).unwrap();
-            let req = parse_head(&head).unwrap();
-            let mut body = Vec::new();
-            {
-                let mut src = BufReader::new(leftover.as_slice().chain(&mut tls));
-                copy_body(&mut src, &mut body, body_framing(&req.headers).unwrap()).unwrap();
-            }
-            let echo = format!(
-                "{}|{}",
-                header_value(&req.headers, "authorization").unwrap_or(""),
-                String::from_utf8_lossy(&body)
-            );
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{echo}",
-                echo.len()
-            );
-            tls.write_all(resp.as_bytes()).unwrap();
-            tls.conn.send_close_notify();
-            let _ = tls.flush();
+            let result = if tls {
+                let mut s = StreamOwned::new(ServerConnection::new(cfg).unwrap(), tcp);
+                let r = echo_one(&mut s);
+                s.conn.send_close_notify();
+                let _ = s.flush();
+                r
+            } else {
+                let mut s = tcp;
+                echo_one(&mut s)
+            };
+            let _ = tx.send(result.ok());
         });
-        (port, cert_der)
+        Upstream { port, cert: cert_der, received }
     }
 
-    /// CONNECTs through the proxy to `localhost:upstream_port`, then speaks TLS
-    /// trusting only `trust`, sends a chunked POST, and returns the response.
-    fn request_via_proxy(proxy_port: u16, upstream_port: u16, trust: &CertificateDer<'static>) -> String {
-        let mut tcp = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
-        write!(tcp, "CONNECT localhost:{upstream_port} HTTP/1.1\r\nHost: localhost:{upstream_port}\r\n\r\n").unwrap();
-        let (head, _) = read_head(&mut tcp).unwrap();
-        assert!(head.starts_with(b"HTTP/1.1 200"), "{}", String::from_utf8_lossy(&head));
-
-        let mut roots = RootCertStore::empty();
-        roots.add(trust.clone()).unwrap();
-        let cfg = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
-        let conn = ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap()).unwrap();
-        let mut tls = StreamOwned::new(conn, tcp);
+    fn echo_one<S: Read + Write>(s: &mut S) -> Result<String> {
+        let (head, leftover) = read_head(s)?;
+        let req = parse_head(&head)?;
+        let mut body = Vec::new();
+        {
+            let mut src = BufReader::new(leftover.as_slice().chain(&mut *s));
+            copy_body(&mut src, &mut body, body_framing(&req.headers)?)?;
+        }
+        let seen = format!("{}{}", String::from_utf8_lossy(&head), String::from_utf8_lossy(&body));
         write!(
-            tls,
-            "POST /v1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {PLACEHOLDER}\r\n\
-             Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
-        )
-        .unwrap();
-        let mut resp = Vec::new();
-        relay_until_eof(&mut tls, &mut resp).unwrap();
-        String::from_utf8(resp).unwrap()
+            s,
+            "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{seen}",
+            seen.len()
+        )?;
+        s.flush()?;
+        Ok(seen)
     }
 
-    fn start(table: PlaceholderTable, upstream_cert: &CertificateDer<'static>) -> (u16, Arc<Mitm>) {
+    fn received(up: &Upstream) -> Option<String> {
+        up.received.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    /// Starts a proxy whose upstream TLS trusts only `upstream_roots`.
+    fn start(table: PlaceholderTable, upstream_roots: &[&CertificateDer<'static>]) -> (u16, Arc<Mitm>) {
         let mut roots = RootCertStore::empty();
-        roots.add(upstream_cert.clone()).unwrap();
+        for cert in upstream_roots {
+            roots.add((*cert).clone()).unwrap();
+        }
         let mitm = Arc::new(Mitm::new(roots).unwrap());
         (start_proxy(table, mitm.clone()).unwrap(), mitm)
     }
 
+    /// Sends `CONNECT authority` and returns the tunnel plus the proxy's status line.
+    fn connect(proxy_port: u16, authority: &str) -> (TcpStream, String) {
+        let mut tcp = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
+        write!(tcp, "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").unwrap();
+        let (head, _) = read_head(&mut tcp).unwrap();
+        let status = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+        (tcp, status)
+    }
+
+    /// TLS client over `tcp`, verifying the server as `localhost` against `trust` only.
+    fn tls_client(tcp: TcpStream, trust: &CertificateDer<'static>) -> StreamOwned<ClientConnection, TcpStream> {
+        let mut roots = RootCertStore::empty();
+        roots.add(trust.clone()).unwrap();
+        let cfg = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+        let conn = ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap()).unwrap();
+        StreamOwned::new(conn, tcp)
+    }
+
+    fn roundtrip<S: Read + Write>(s: &mut S, request: &str) -> String {
+        s.write_all(request.as_bytes()).unwrap();
+        let mut resp = Vec::new();
+        let _ = relay_until_eof(s, &mut resp);
+        String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    fn chunked_post() -> String {
+        format!(
+            "POST /v1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {PLACEHOLDER}\r\n\
+             Transfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+        )
+    }
+
     #[test]
     fn https_to_bound_host_is_intercepted_and_swapped() {
-        let (upstream_port, upstream_cert) = spawn_upstream();
-        let (proxy_port, mitm) = start(table_bound_to("localhost"), &upstream_cert);
+        let up = spawn_upstream(true);
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
 
-        let resp = request_via_proxy(proxy_port, upstream_port, mitm.ca_der());
+        let (tcp, status) = connect(proxy, &format!("localhost:{}", up.port));
+        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+        let resp = roundtrip(&mut tls_client(tcp, mitm.ca_der()), &chunked_post());
+
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-        assert!(resp.ends_with("Bearer REAL|5\r\nhello\r\n0\r\n\r\n"), "{resp}");
+        let seen = received(&up).unwrap();
+        assert!(seen.contains("Authorization: Bearer REAL\r\n"), "{seen}");
+        assert!(seen.ends_with("5\r\nhello\r\n0\r\n\r\n"), "{seen}");
     }
 
     #[test]
     fn https_to_unbound_host_is_tunneled_untouched() {
-        let (upstream_port, upstream_cert) = spawn_upstream();
-        let (proxy_port, _mitm) = start(table_bound_to("api.example.com"), &upstream_cert);
+        let up = spawn_upstream(true);
+        let (proxy, _mitm) = start(table_bound_to("api.example.com"), &[&up.cert]);
 
-        // Not intercepted: the client talks TLS to the real upstream directly.
-        let resp = request_via_proxy(proxy_port, upstream_port, &upstream_cert);
-        assert!(resp.ends_with(&format!("Bearer {PLACEHOLDER}|5\r\nhello\r\n0\r\n\r\n")), "{resp}");
+        // Not intercepted: the client completes TLS with the real upstream itself.
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
+
+        let seen = received(&up).unwrap();
+        assert!(seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")), "{seen}");
+    }
+
+    #[test]
+    fn swap_follows_connect_target_not_inner_host_header() {
+        let up = spawn_upstream(true);
+        let (proxy, _mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+
+        // Same server, reached under a name that isn't bound; the inner Host
+        // header claims the bound name. Must be tunneled, never swapped.
+        let (tcp, _) = connect(proxy, &format!("127.0.0.1:{}", up.port));
+        roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
+
+        let seen = received(&up).unwrap();
+        assert!(seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")), "{seen}");
+        assert!(!seen.contains("REAL"), "{seen}");
+    }
+
+    #[test]
+    fn untrusted_upstream_never_receives_the_secret() {
+        let up = spawn_upstream(true);
+        let unrelated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        // The proxy trusts some other cert, so the upstream fails verification.
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[unrelated.cert.der()]);
+
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let resp = roundtrip(&mut tls_client(tcp, mitm.ca_der()), &chunked_post());
+
+        assert_eq!(resp, "");
+        assert_eq!(received(&up), None, "upstream must not get a request");
+    }
+
+    #[test]
+    fn https_content_length_body_with_expect_continue_and_hop_by_hop_stripped() {
+        let up = spawn_upstream(true);
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let mut tls = tls_client(tcp, mitm.ca_der());
+
+        write!(
+            tls,
+            "PUT /v1 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {PLACEHOLDER}\r\n\
+             Proxy-Authorization: Basic cHJveHk=\r\nConnection: keep-alive\r\nKeep-Alive: timeout=5\r\n\
+             Expect: 100-continue\r\nContent-Length: 5\r\n\r\n"
+        )
+        .unwrap();
+        let (interim, _) = read_head(&mut tls).unwrap();
+        assert!(interim.starts_with(b"HTTP/1.1 100 Continue"));
+        let resp = roundtrip(&mut tls, "hello");
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+
+        let seen = received(&up).unwrap().to_ascii_lowercase();
+        assert!(seen.contains("authorization: bearer real\r\n"), "{seen}");
+        assert!(seen.contains("connection: close\r\n"), "{seen}");
+        assert!(seen.ends_with("\r\n\r\nhello"), "{seen}");
+        for stripped in ["proxy-authorization", "keep-alive", "expect", "connection: keep-alive"] {
+            assert!(!seen.contains(stripped), "{stripped} leaked upstream: {seen}");
+        }
+    }
+
+    #[test]
+    fn plain_http_swaps_only_for_bound_host() {
+        for (bound, expected) in [("localhost", "Bearer REAL"), ("api.example.com", "Bearer hush_ph_test")] {
+            let up = spawn_upstream(false);
+            let (proxy, _mitm) = start(table_bound_to(bound), &[]);
+
+            let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+            let request = chunked_post().replacen("/v1", &format!("http://localhost:{}/v1", up.port), 1);
+            let resp = roundtrip(&mut tcp, &request);
+            assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+
+            let seen = received(&up).unwrap();
+            assert!(seen.starts_with("POST /v1 HTTP/1.1\r\n"), "{seen}");
+            assert!(seen.contains(&format!("Authorization: {expected}\r\n")), "bound={bound}: {seen}");
+            assert!(seen.ends_with("5\r\nhello\r\n0\r\n\r\n"), "{seen}");
+        }
+    }
+
+    #[test]
+    fn connect_to_unreachable_host_returns_502() {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (proxy, _mitm) = start(table_bound_to("localhost"), &[]);
+        let (_, status) = connect(proxy, &format!("127.0.0.1:{port}"));
+        assert!(status.starts_with("HTTP/1.1 502"), "{status}");
     }
 }
