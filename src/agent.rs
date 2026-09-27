@@ -9,6 +9,7 @@ use rand::RngCore;
 
 use crate::protocol::{BindingInfo, Request, Response, SecretInfo};
 use crate::proxy::{start_proxy, PlaceholderEntry, PlaceholderTable};
+use crate::tls::{self, Mitm};
 use crate::vault::{save_vault, socket_path, Binding, SecretEntry, Vault};
 
 struct AgentState {
@@ -24,8 +25,12 @@ pub fn run(vault: Vault, passphrase: String) -> Result<()> {
         std::fs::remove_file(&path)?;
     }
 
+    let (upstream_roots, system_roots) = tls::native_roots()?;
+    let mitm = Arc::new(Mitm::new(upstream_roots)?);
+    tls::write_trust_files(&mitm, &system_roots)?;
+
     let placeholders: PlaceholderTable = Arc::new(Mutex::new(HashMap::new()));
-    let proxy_port = start_proxy(placeholders.clone())?;
+    let proxy_port = start_proxy(placeholders.clone(), mitm)?;
 
     let state = Arc::new(AgentState {
         vault: Mutex::new(vault),

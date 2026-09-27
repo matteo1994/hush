@@ -12,3 +12,8 @@ age = { version = "0.11", features = ["armor"] }
 rand = "0.8"
 httparse = "1"
 anyhow = "1"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
+rustls-native-certs = "0.8.4"
+time = "0.3.55"
+pem = "4"

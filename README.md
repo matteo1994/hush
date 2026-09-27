@@ -39,6 +39,19 @@ STRIPE_SECRET_KEY=
 
 Each `_KEY`-suffixed name found there is cross-referenced against what's actually registered in the vault (filtered by `--env` if given); anything not registered is silently skipped, and anything registered but not listed in `.env` is never exposed to that project. `.env`'s value column is ignored entirely — the real value only ever lives in the vault.
 
+### HTTPS
+
+`hush run` sets `HTTPS_PROXY`/`https_proxy` alongside `HTTP_PROXY`. When a `CONNECT` targets a host that one of the minted placeholders is bound to, `hush-agent` intercepts it: it terminates TLS with a certificate for that host signed by a **per-session CA**, swaps the placeholder, and forwards the request over its own TLS connection to the real host, verified against the system trust store. `CONNECT`s to every other host get a blind byte tunnel. hush never decrypts traffic it has no secret for, and the placeholder in it goes out verbatim.
+
+The session CA is generated at `hush unlock` and its private key only ever exists in `hush-agent`'s memory. Nothing is added to the system keychain. Instead, `hush run` points the child at the CA through environment variables:
+
+| Variable | Points at |
+|---|---|
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` | `~/.config/hush/ca-bundle.pem`: system roots plus the session CA |
+| `NODE_EXTRA_CA_CERTS` | `~/.config/hush/ca.pem`: the session CA alone |
+
+`NODE_USE_ENV_PROXY=1` is also set, so Node 24.5+ honors the proxy variables.
+
 ## Usage
 
 ```bash
@@ -62,7 +75,8 @@ hush run --env staging -- ./deploy.sh
 
 ## Current scope (v0)
 
-- **Plain HTTP only.** No TLS interception yet — `HTTP_PROXY`/`http_proxy` only. HTTPS target support (own CA + cert generation) is the natural next step.
+- **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, and each request goes upstream with `Connection: close`. WebSocket upgrades to a bound host aren't supported.
+- **The client must honor the proxy and CA variables above.** curl, Python (`urllib`, `requests`), OpenSSL-based tools and Node 24.5+ do. Clients that only read the OS keychain (for example Go binaries on macOS) or that pin certificates won't work against bound hosts, and fail with a TLS error instead of leaking anything.
 - **Foreground agent, no daemon.** `hush unlock` is a long-lived process you start yourself; there's no system service, no dedicated OS user, no `sudo` anywhere. Simpler than the alternative, at the cost of needing to keep a terminal/background job alive per session.
 - **One passphrase prompt per session**, not per command. Everything after `hush unlock` — as many `hush run` invocations as you want — needs no further interaction.
 
@@ -71,6 +85,8 @@ hush run --env staging -- ./deploy.sh
 **What this protects against:** an AI agent (or anything running as your own user) that reads env vars, inspects config files, or is prompt-injected into printing or exfiltrating "the API key" — because the real bytes are never in its reachable process tree in the first place. Also protects the value at rest: the vault file is encrypted, so directly reading it gets ciphertext.
 
 **What this does not protect against:** something that can read `hush-agent`'s own process memory directly (rather than going through a normal file read) — this is a materially higher bar than the filesystem-based leaks it's designed to close, but it isn't a hard cryptographic guarantee. Real isolation (separate OS user, container, sandboxed agent execution) still strengthens this further and is complementary, not required.
+
+**The session CA** can mint a certificate for any host, and every `hush run` child trusts it. Its key never leaves `hush-agent`'s memory and stops existing when the agent exits, so this adds nothing an attacker could steal from disk. Anything that can read that memory could already read the secrets themselves. The CA files written to `~/.config/hush/` are public certificates only.
 
 **Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
 
