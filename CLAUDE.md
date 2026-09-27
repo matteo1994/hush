@@ -16,28 +16,29 @@ cargo test                  # proxy unit tests + in-process TLS end-to-end tests
 cargo test <name>           # run a single test by name filter
 ```
 
-Toolchain is pinned to nightly via `rust-toolchain.toml` (rustup). Unix-only (Unix domain sockets, `PermissionsExt`). Rust edition 2024.
+Toolchain is pinned to nightly via `rust-toolchain.toml` (rustup). Unix-only (`PermissionsExt`, `ExitStatusExt`, `libc` signals). Rust edition 2024.
 
-Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by `init`/`unlock`) and `HUSH_SECRET_VALUE` (used by `secret add`). Note these operate on the real vault at `~/.config/hush/` — there is no config-dir override, so point `HOME` at a throwaway directory. Keep that path short: macOS caps Unix socket paths at 104 bytes, and a too-long `agent.sock` path makes `hush unlock` fail silently.
+Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by every command that opens the vault) and `HUSH_SECRET_VALUE` (used by `secret add`). They operate on the real vault at `~/.config/hush/`, and there is no config-dir override, so point `HOME` at a throwaway directory such as `target/e2e`. `hush run` strips both variables from the child, so a nested `hush secret ...` inside it has to prompt, and fails with "no terminal" when there is none.
 
 ## Architecture
 
-Single binary, two roles:
+Single binary, no background process. Each command opens the vault itself.
 
-- **CLI client** (`main.rs`, `client.rs`): every `hush secret ...` and `hush run` call is a thin client that sends one JSON request line over the Unix socket `~/.config/hush/agent.sock` and reads one JSON response line. Only `init` and `unlock` touch the vault file directly.
-- **`hush-agent`** (`agent.rs`): the long-lived process started by `hush unlock`. Holds the decrypted `Vault` and the passphrase in memory, serves the socket (thread per connection), and on every mutation re-encrypts and atomically rewrites the vault (`save_vault` writes `vault.age.tmp` then renames). It also starts the proxy.
+- **CLI** (`main.rs`): `init`, and `secret add/bind/rm/ls`, which load the vault with the passphrase, mutate it, and `save_vault` it again (writes `vault.age.tmp`, then renames). Mutations print what will change before prompting, and warn when `HUSH_ACTIVE` is set, i.e. when running inside `hush run`. `find_managed_keys`/`managed_keys` parse `.env`.
+- **`hush run`** (`run.rs`): prompts only if `.env` names a `_KEY`. It loads the vault, `mint`s a `hush_ph_<32 hex>` placeholder per matched name into a `PlaceholderEntry` table, and drops the vault, so only the named secrets stay in memory. Then it creates a `Mitm`, writes trust files into a private `RunDir` (`~/.config/hush/runs/<pid>/`, removed on drop; directories of runs whose pid no longer exists are swept at the next start), starts the proxy threads in-process, and spawns the child. After spawning it ignores SIGINT/SIGQUIT, so Ctrl-C reaches the child without killing the proxy. The child's exit code is passed through (`128+signal` if it was killed).
 - **Proxy** (`proxy.rs`): forward proxy on `127.0.0.1:<random port>`, thread per connection. Plain HTTP (absolute-form URI or `Host` header) and intercepted HTTPS both go through `forward`: one request per connection, sent upstream with `Connection: close` and hop-by-hop headers stripped, body relayed by `Content-Length` or chunked framing, response relayed until upstream EOF. `CONNECT` to a host that some minted placeholder is bound to (`is_bound_host`) is intercepted; any other `CONNECT` is a blind TCP tunnel that is never decrypted. Swapping (`substitute_placeholders`) only happens when the header name matches the binding's `header` (case-insensitive), the header value exactly equals `format` with `{value}` → placeholder, and the target host string equals the binding's host (case-insensitive; port is not compared — for HTTPS the target is the `CONNECT` authority, not the inner `Host` header). Otherwise the placeholder is forwarded verbatim — this silent pass-through is the core security property, don't turn it into an error.
-- **TLS** (`tls.rs`): `Mitm` holds a per-session CA generated at `hush unlock`, whose key lives only in memory, plus cached per-host leaf `ServerConfig`s and the upstream `ClientConfig` (system roots via `rustls-native-certs`, `ring` provider, HTTP/1.1 ALPN only). `write_trust_files` writes `ca.pem` and `ca-bundle.pem` (system roots + CA) to the config dir. Leaves need an Authority Key Identifier and ≤398-day validity, or OpenSSL strict mode (Python 3.13+) and Apple clients reject them.
-- **Wire protocol** (`protocol.rs`): serde-tagged enums — `Request` tagged by `cmd`, `Response` tagged by `status`, both `snake_case`. Adding a command means touching `protocol.rs`, `agent::handle_request`, and the clap enums in `main.rs`.
-- **Vault** (`vault.rs`): age scrypt-passphrase-encrypted JSON of `name → SecretEntry { value, bindings }`. Each `Binding` has `host`, optional `env`, `header` (default `Authorization`), `format` (default `Bearer {value}`). `find_binding` prefers an exact `--env` match, then falls back to an unscoped binding. Config dir is `0700`, vault and socket are `0600`.
+- **TLS** (`tls.rs`): `Mitm` holds a per-run CA whose key lives only in memory, plus cached per-host leaf `ServerConfig`s and the upstream `ClientConfig` (system roots via `rustls-native-certs`, `ring` provider, HTTP/1.1 ALPN only). `write_trust_files` writes `ca.pem` and `ca-bundle.pem` (system roots + CA) into the run's directory. Leaves need an Authority Key Identifier and ≤398-day validity, or OpenSSL strict mode (Python 3.13+) and Apple clients reject them.
+- **Vault** (`vault.rs`): age scrypt-passphrase-encrypted JSON of `name → SecretEntry { value, bindings }`. Each `Binding` has `host`, optional `env`, `header` (default `Authorization`), `format` (default `Bearer {value}`). `find_binding` prefers an exact `--env` match, then falls back to an unscoped binding. Config dir and `runs/` are `0700`, the vault is `0600`.
 
-### `hush run` flow
+### Child environment (`run::child_env`)
 
-1. `find_managed_keys` scans `./.env` for names ending in `_KEY` (values ignored).
-2. Sends `Mint { names, env }`; the agent generates a `hush_ph_<32 hex>` placeholder per matched name and records it in the shared `PlaceholderTable` (placeholders are never evicted for the agent's lifetime).
-3. The child is spawned with `env_clear()` + the parent env + placeholders + proxy vars (`HTTP(S)_PROXY`, both cases) + CA trust vars (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` → bundle; `NODE_EXTRA_CA_CERTS` → CA only; `NODE_USE_ENV_PROXY=1`). Exit code is passed through.
+The parent env minus `HUSH_PASSPHRASE`/`HUSH_SECRET_VALUE`, plus:
+- the placeholders;
+- `HUSH_ACTIVE=1`, which makes a nested `hush run` refuse to start;
+- with a proxy running: `HTTP(S)_PROXY` in both cases, `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`GIT_SSL_CAINFO` pointing at the bundle, `NODE_EXTRA_CA_CERTS` pointing at the CA alone, and `NODE_USE_ENV_PROXY=1`.
 
 ## Invariants to preserve
 
-- Real secret values must never enter a `hush run` child's environment, argv, stdout/stderr, or any `Response` sent to a client (`ListSecrets` returns bindings only).
-- Only bound hosts are ever intercepted, and the CA private key must never be written to disk or sent to a client.
+- Real secret values must never enter a `hush run` child's environment, argv or stdout/stderr (`secret ls` prints bindings only).
+- Every vault change must require the passphrase, and nothing may hand the passphrase or a decrypted vault to the child. That's what stops a child from rebinding a secret to a host it controls.
+- Only bound hosts are ever intercepted, and the CA private key must never be written to disk.

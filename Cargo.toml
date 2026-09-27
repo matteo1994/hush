@@ -17,6 +17,7 @@ rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pe
 rustls-native-certs = "0.8.4"
 time = "0.3.55"
 pem = "4"
+libc = "0.2"
 
 [dev-dependencies]
 x509-parser = "0.18"
