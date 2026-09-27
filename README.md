@@ -75,6 +75,8 @@ hush run --env staging -- ./deploy.sh
 
 ## Current scope (v0)
 
+> **Don't use hush with real keys yet.** `hush-agent`'s socket accepts `secret bind`/`add`/`rm` from any process running as you, without the passphrase. A command started by `hush run` can therefore bind a secret to a host it controls and receive the real value. The fix, making `hush run` hold the vault itself and requiring the passphrase for every vault change, is the next change.
+
 - **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, and each request goes upstream with `Connection: close`. WebSocket upgrades to a bound host aren't supported.
 - **The client must honor the proxy and CA variables above.** curl, Python (`urllib`, `requests`), OpenSSL-based tools and Node 24.5+ do. Clients that only read the OS keychain (for example Go binaries on macOS) or that pin certificates won't work against bound hosts, and fail with a TLS error instead of leaking anything.
 - **Foreground agent, no daemon.** `hush unlock` is a long-lived process you start yourself; there's no system service, no dedicated OS user, no `sudo` anywhere. Simpler than the alternative, at the cost of needing to keep a terminal/background job alive per session.
