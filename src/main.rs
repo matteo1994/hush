@@ -6,7 +6,7 @@ mod vault;
 use std::fs;
 use std::process::ExitCode;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 use vault::Binding;
@@ -18,7 +18,10 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
         return Ok(v);
     }
     rpassword::prompt_password(prompt).map_err(|e| match e.raw_os_error() {
-        Some(libc::ENXIO) => anyhow::anyhow!("no terminal to prompt on for {}", prompt.trim_end_matches([':', ' '])),
+        Some(libc::ENXIO) => anyhow::anyhow!(
+            "no terminal to prompt on for {}",
+            prompt.trim_end_matches([':', ' '])
+        ),
         _ => e.into(),
     })
 }
@@ -133,26 +136,48 @@ fn cmd_init() -> Result<ExitCode> {
 /// printed before the prompt so you can see what you're approving.
 fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
     if std::env::var_os(run::ACTIVE_VAR).is_some() && !matches!(action, SecretAction::Ls) {
-        eprintln!("hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you.");
+        eprintln!(
+            "hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you."
+        );
         eprintln!("hush: only enter the passphrase if you typed this command yourself.");
     }
 
     match action {
-        SecretAction::Add { name, host, env, header, format } => {
+        SecretAction::Add {
+            name,
+            host,
+            env,
+            header,
+            format,
+        } => {
             let binding = Binding::new(host, env, header, format);
             eprintln!("adding {name}, bound to {}", describe(&binding));
             let pass = passphrase()?;
             let mut v = vault::load_vault(&pass)?;
             let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
-            v.secrets.insert(name, vault::SecretEntry { value, bindings: vec![binding] });
+            v.secrets.insert(
+                name,
+                vault::SecretEntry {
+                    value,
+                    bindings: vec![binding],
+                },
+            );
             vault::save_vault(&v, &pass)?;
         }
-        SecretAction::Bind { name, host, env, header, format } => {
+        SecretAction::Bind {
+            name,
+            host,
+            env,
+            header,
+            format,
+        } => {
             let binding = Binding::new(host, env, header, format);
             eprintln!("binding {name} to {}", describe(&binding));
             let pass = passphrase()?;
             let mut v = vault::load_vault(&pass)?;
-            let Some(entry) = v.secrets.get_mut(&name) else { bail!("no such secret: {name}") };
+            let Some(entry) = v.secrets.get_mut(&name) else {
+                bail!("no such secret: {name}")
+            };
             entry.bindings.push(binding);
             vault::save_vault(&v, &pass)?;
         }
@@ -182,7 +207,10 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
 
 fn describe(b: &Binding) -> String {
     let env = b.env.as_deref().unwrap_or("default");
-    format!("[{env}] host={} header={} format=\"{}\"", b.host, b.header, b.format)
+    format!(
+        "[{env}] host={} header={} format=\"{}\"",
+        b.host, b.header, b.format
+    )
 }
 
 /// Scans `.env` in the current directory for `_KEY`-suffixed names.
@@ -218,6 +246,9 @@ mod tests {
     #[test]
     fn managed_keys_are_key_suffixed_names_only() {
         let dotenv = "# comment\n\nBILLING_API_KEY=\n  STRIPE_SECRET_KEY = sk_ignored\nDATABASE_URL=postgres://\nKEYRING=x\nnot a pair\n";
-        assert_eq!(managed_keys(dotenv), vec!["BILLING_API_KEY", "STRIPE_SECRET_KEY"]);
+        assert_eq!(
+            managed_keys(dotenv),
+            vec!["BILLING_API_KEY", "STRIPE_SECRET_KEY"]
+        );
     }
 }
