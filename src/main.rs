@@ -1,18 +1,15 @@
-mod agent;
-mod client;
-mod protocol;
 mod proxy;
+mod run;
 mod tls;
 mod vault;
 
-use std::collections::HashMap;
 use std::fs;
 use std::process::ExitCode;
 
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 
-use protocol::Request;
+use vault::Binding;
 
 /// Reads a secret input interactively (hidden), or from an env var for
 /// scripting/testing — same escape hatch pattern as e.g. `murk --stdin`.
@@ -20,7 +17,10 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
     if let Ok(v) = std::env::var(env_override) {
         return Ok(v);
     }
-    Ok(rpassword::prompt_password(prompt)?)
+    rpassword::prompt_password(prompt).map_err(|e| match e.raw_os_error() {
+        Some(libc::ENXIO) => anyhow::anyhow!("no terminal to prompt on for {}", prompt.trim_end_matches([':', ' '])),
+        _ => e.into(),
+    })
 }
 
 #[derive(Parser)]
@@ -34,14 +34,13 @@ struct Cli {
 enum Command {
     /// Create a new vault and set its passphrase.
     Init,
-    /// Unlock the vault into a session-lived agent (like ssh-agent). Run this once per session.
-    Unlock,
     /// Manage secrets in the vault.
     Secret {
         #[command(subcommand)]
         action: SecretAction,
     },
     /// Run a command with managed secrets swapped in on the wire, never in its own env.
+    /// Prompts for the passphrase when `.env` names any managed secret.
     Run {
         #[arg(long)]
         env: Option<String>,
@@ -84,7 +83,7 @@ enum SecretAction {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli) {
+    match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("hush: {e}");
@@ -93,13 +92,22 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
+fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => cmd_init(),
-        Command::Unlock => cmd_unlock(),
         Command::Secret { action } => cmd_secret(action),
-        Command::Run { env, cmd } => cmd_run(env, cmd),
+        Command::Run { env, cmd } => {
+            let names = find_managed_keys()?;
+            run::run(names, env, cmd, passphrase)
+        }
     }
+}
+
+fn passphrase() -> Result<String> {
+    if !vault::vault_exists()? {
+        bail!("no vault found — run `hush init` first");
+    }
+    read_secret("Vault passphrase: ", "HUSH_PASSPHRASE")
 }
 
 fn cmd_init() -> Result<ExitCode> {
@@ -116,105 +124,65 @@ fn cmd_init() -> Result<ExitCode> {
     }
     vault::init_vault(&pass1)?;
     println!("vault created at {}", vault::vault_path()?.display());
-    println!("run `hush unlock` to start a session.");
+    println!("add a secret with `hush secret add NAME --host HOST`.");
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_unlock() -> Result<ExitCode> {
-    if !vault::vault_exists()? {
-        bail!("no vault found — run `hush init` first");
-    }
-    let pass = read_secret("Passphrase: ", "HUSH_PASSPHRASE")?;
-    let v = vault::load_vault(&pass)?;
-    agent::run(v, pass)?;
-    Ok(ExitCode::SUCCESS)
-}
-
+/// Every vault change needs the passphrase, so a process started by
+/// `hush run` can't rebind a secret to a host it controls. The change is
+/// printed before the prompt so you can see what you're approving.
 fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
+    if std::env::var_os(run::ACTIVE_VAR).is_some() && !matches!(action, SecretAction::Ls) {
+        eprintln!("hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you.");
+        eprintln!("hush: only enter the passphrase if you typed this command yourself.");
+    }
+
     match action {
         SecretAction::Add { name, host, env, header, format } => {
+            let binding = Binding::new(host, env, header, format);
+            eprintln!("adding {name}, bound to {}", describe(&binding));
+            let pass = passphrase()?;
+            let mut v = vault::load_vault(&pass)?;
             let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
-            let resp = client::send(&Request::AddSecret { name, value, host, env, header, format })?;
-            print_status(resp)
+            v.secrets.insert(name, vault::SecretEntry { value, bindings: vec![binding] });
+            vault::save_vault(&v, &pass)?;
         }
         SecretAction::Bind { name, host, env, header, format } => {
-            let resp = client::send(&Request::BindSecret { name, host, env, header, format })?;
-            print_status(resp)
+            let binding = Binding::new(host, env, header, format);
+            eprintln!("binding {name} to {}", describe(&binding));
+            let pass = passphrase()?;
+            let mut v = vault::load_vault(&pass)?;
+            let Some(entry) = v.secrets.get_mut(&name) else { bail!("no such secret: {name}") };
+            entry.bindings.push(binding);
+            vault::save_vault(&v, &pass)?;
         }
         SecretAction::Rm { name } => {
-            let resp = client::send(&Request::RemoveSecret { name })?;
-            print_status(resp)
+            eprintln!("removing {name}");
+            let pass = passphrase()?;
+            let mut v = vault::load_vault(&pass)?;
+            if v.secrets.remove(&name).is_none() {
+                bail!("no such secret: {name}");
+            }
+            vault::save_vault(&v, &pass)?;
         }
         SecretAction::Ls => {
-            let resp = client::send(&Request::ListSecrets)?;
-            if let protocol::Response::SecretList { secrets } = resp {
-                for s in secrets {
-                    println!("{}", s.name);
-                    for b in s.bindings {
-                        let env_label = b.env.unwrap_or_else(|| "default".to_string());
-                        println!("  [{env_label}] host={} header={} format=\"{}\"", b.host, b.header, b.format);
-                    }
+            let v = vault::load_vault(&passphrase()?)?;
+            let mut names: Vec<_> = v.secrets.keys().collect();
+            names.sort();
+            for name in names {
+                println!("{name}");
+                for b in &v.secrets[name].bindings {
+                    println!("  {}", describe(b));
                 }
             }
-            Ok(ExitCode::SUCCESS)
         }
     }
+    Ok(ExitCode::SUCCESS)
 }
 
-fn print_status(resp: protocol::Response) -> Result<ExitCode> {
-    match resp {
-        protocol::Response::Ok => Ok(ExitCode::SUCCESS),
-        protocol::Response::Error { message } => {
-            eprintln!("hush: {message}");
-            Ok(ExitCode::FAILURE)
-        }
-        _ => Ok(ExitCode::SUCCESS),
-    }
-}
-
-fn cmd_run(env: Option<String>, cmd: Vec<String>) -> Result<ExitCode> {
-    let names = find_managed_keys()?;
-
-    let mut child_env: HashMap<String, String> = std::env::vars().collect();
-
-    if !names.is_empty() {
-        let resp = client::send(&Request::Mint { names, env })?;
-        match resp {
-            protocol::Response::Minted { proxy_port, placeholders, unmatched } => {
-                for name in &unmatched {
-                    eprintln!("hush: warning: {name} has no matching binding, not injected");
-                }
-                for (name, placeholder) in placeholders {
-                    child_env.insert(name, placeholder);
-                }
-                let proxy_url = format!("http://127.0.0.1:{proxy_port}");
-                for var in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
-                    child_env.insert(var.to_string(), proxy_url.clone());
-                }
-                // Trust the session CA for intercepted hosts. These variables
-                // replace the default roots, so they get system roots + CA.
-                let bundle = vault::ca_bundle_path()?.display().to_string();
-                for var in ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO"] {
-                    child_env.insert(var.to_string(), bundle.clone());
-                }
-                // Node appends to its roots instead, and only honors proxy
-                // env vars when asked to.
-                child_env.insert("NODE_EXTRA_CA_CERTS".to_string(), vault::ca_cert_path()?.display().to_string());
-                child_env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
-            }
-            protocol::Response::Error { message } => bail!(message),
-            _ => {}
-        }
-    }
-
-    let (program, args) = cmd.split_first().expect("clap requires at least one cmd arg");
-    let status = std::process::Command::new(program)
-        .args(args)
-        .env_clear()
-        .envs(&child_env)
-        .status()?;
-
-    Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+fn describe(b: &Binding) -> String {
+    let env = b.env.as_deref().unwrap_or("default");
+    format!("[{env}] host={} header={} format=\"{}\"", b.host, b.header, b.format)
 }
 
 /// Scans `.env` in the current directory for `_KEY`-suffixed names.
@@ -224,9 +192,12 @@ fn find_managed_keys() -> Result<Vec<String>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = fs::read_to_string(path)?;
+    Ok(managed_keys(&fs::read_to_string(path)?))
+}
+
+fn managed_keys(dotenv: &str) -> Vec<String> {
     let mut names = Vec::new();
-    for line in content.lines() {
+    for line in dotenv.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -237,5 +208,16 @@ fn find_managed_keys() -> Result<Vec<String>> {
             names.push(key.trim().to_string());
         }
     }
-    Ok(names)
+    names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_keys_are_key_suffixed_names_only() {
+        let dotenv = "# comment\n\nBILLING_API_KEY=\n  STRIPE_SECRET_KEY = sk_ignored\nDATABASE_URL=postgres://\nKEYRING=x\nnot a pair\n";
+        assert_eq!(managed_keys(dotenv), vec!["BILLING_API_KEY", "STRIPE_SECRET_KEY"]);
+    }
 }

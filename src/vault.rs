@@ -26,6 +26,17 @@ fn default_format() -> String {
     "Bearer {value}".to_string()
 }
 
+impl Binding {
+    pub fn new(host: String, env: Option<String>, header: Option<String>, format: Option<String>) -> Self {
+        Binding {
+            host,
+            env,
+            header: header.unwrap_or_else(default_header),
+            format: format.unwrap_or_else(default_format),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub value: String,
@@ -67,16 +78,9 @@ pub fn vault_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("vault.age"))
 }
 
-pub fn socket_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("agent.sock"))
-}
-
-pub fn ca_cert_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("ca.pem"))
-}
-
-pub fn ca_bundle_path() -> Result<PathBuf> {
-    Ok(config_dir()?.join("ca-bundle.pem"))
+/// Parent of the per-`hush run` directories holding that run's CA files.
+pub fn runs_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("runs"))
 }
 
 pub fn vault_exists() -> Result<bool> {
@@ -134,7 +138,7 @@ pub fn save_vault(vault: &Vault, passphrase: &str) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn set_private_mode(path: &PathBuf) -> Result<()> {
+pub fn set_private_mode(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())

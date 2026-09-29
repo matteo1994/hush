@@ -21,9 +21,8 @@ An AI coding agent that needs to call a billing/payments/whatever API needs the 
 
 ## How it works
 
-- **`hush unlock`** — run once per session (like `ssh-agent`). Prompts for a passphrase, decrypts your local vault into memory inside a small resident helper process (`hush-agent`), and starts a loopback HTTP proxy. The on-disk vault stays encrypted (age, passphrase-based) at all times; the decrypted secrets only ever exist in `hush-agent`'s own memory.
-- **`hush secret add NAME --host HOST`** — register a secret and the one host it's allowed to be injected into. The binding (which host) lives with the secret, set once, not duplicated anywhere else.
-- **`hush run -- CMD...`** — runs `CMD` with a random placeholder in place of each managed secret's real value. `CMD`'s own environment never contains the real bytes — only `hush-agent` does. When `CMD` makes an HTTP request through the proxy, `hush-agent` swaps the placeholder for the real value *on the wire*, but only if the request is going to that secret's bound host. A request to any other host gets the placeholder forwarded verbatim — no error, no side channel, just a normal auth failure from whatever it hit.
+- **`hush secret add NAME --host HOST`**: register a secret and the one host it may be injected into. The binding lives with the secret in the vault, which is encrypted on disk (age, passphrase-based). Every vault change asks for the passphrase and shows what it's about to change first.
+- **`hush run -- CMD...`**: asks for the passphrase and decrypts only the secrets the project's `.env` names. It then starts a loopback proxy inside itself and runs `CMD` as its child, with a random placeholder in place of each real value. `CMD`'s environment never contains the real bytes. When `CMD` makes a request through the proxy, `hush run` swaps the placeholder for the real value *on the wire*, but only if the request is going to that secret's bound host. A request to any other host gets the placeholder forwarded verbatim: no error, no side channel, just a normal auth failure from whatever it hit. When `CMD` exits, the decrypted secrets go with it.
 
 That last part is the actual security property: even if an agent is prompt-injected into sending "the Authorization header" to an attacker's endpoint, there's nothing to send — the agent never had the real value, and the proxy refuses to hand it to an unauthorized destination.
 
@@ -41,14 +40,14 @@ Each `_KEY`-suffixed name found there is cross-referenced against what's actuall
 
 ### HTTPS
 
-`hush run` sets `HTTPS_PROXY`/`https_proxy` alongside `HTTP_PROXY`. When a `CONNECT` targets a host that one of the minted placeholders is bound to, `hush-agent` intercepts it: it terminates TLS with a certificate for that host signed by a **per-session CA**, swaps the placeholder, and forwards the request over its own TLS connection to the real host, verified against the system trust store. `CONNECT`s to every other host get a blind byte tunnel. hush never decrypts traffic it has no secret for, and the placeholder in it goes out verbatim.
+`hush run` sets `HTTPS_PROXY`/`https_proxy` alongside `HTTP_PROXY`. When a `CONNECT` targets a host that one of the minted placeholders is bound to, `hush run` intercepts it: it terminates TLS with a certificate for that host signed by a **per-run CA**, swaps the placeholder, and forwards the request over its own TLS connection to the real host, verified against the system trust store. `CONNECT`s to every other host get a blind byte tunnel. hush never decrypts traffic it has no secret for, and the placeholder in it goes out verbatim.
 
-The session CA is generated at `hush unlock` and its private key only ever exists in `hush-agent`'s memory. Nothing is added to the system keychain. Instead, `hush run` points the child at the CA through environment variables:
+The CA is generated when `hush run` starts and its private key only ever exists in that process's memory. Nothing is added to the system keychain. Instead, `hush run` points the child at the CA through environment variables, using files in a private per-run directory under `~/.config/hush/runs/` that is removed when the run ends:
 
 | Variable | Points at |
 |---|---|
-| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` | `~/.config/hush/ca-bundle.pem`: system roots plus the session CA |
-| `NODE_EXTRA_CA_CERTS` | `~/.config/hush/ca.pem`: the session CA alone |
+| `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` | `ca-bundle.pem`: system roots plus the run's CA |
+| `NODE_EXTRA_CA_CERTS` | `ca.pem`: the run's CA alone |
 
 `NODE_USE_ENV_PROXY=1` is also set, so Node 24.5+ honors the proxy variables.
 
@@ -57,7 +56,6 @@ The session CA is generated at `hush unlock` and its private key only ever exist
 ```bash
 # One-time setup
 hush init                                   # create a new vault, set its passphrase
-hush unlock                                 # start the session agent (leave running, e.g. `hush unlock &`)
 
 # Register a secret
 hush secret add BILLING_API_KEY --host api.example.com
@@ -71,24 +69,27 @@ hush secret rm BILLING_API_KEY
 # Run something with managed secrets in scope, none of them ever in its real form
 hush run -- python billing_client.py
 hush run --env staging -- ./deploy.sh
+hush run -- claude                          # a coding agent and everything it starts
 ```
 
 ## Current scope (v0)
 
-> **Don't use hush with real keys yet.** `hush-agent`'s socket accepts `secret bind`/`add`/`rm` from any process running as you, without the passphrase. A command started by `hush run` can therefore bind a secret to a host it controls and receive the real value. The fix, making `hush run` hold the vault itself and requiring the passphrase for every vault change, is the next change.
-
 - **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, and each request goes upstream with `Connection: close`. WebSocket upgrades to a bound host aren't supported.
 - **The client must honor the proxy and CA variables above.** curl, Python (`urllib`, `requests`), OpenSSL-based tools and Node 24.5+ do. Clients that only read the OS keychain (for example Go binaries on macOS) or that pin certificates won't work against bound hosts, and fail with a TLS error instead of leaking anything.
-- **Foreground agent, no daemon.** `hush unlock` is a long-lived process you start yourself; there's no system service, no dedicated OS user, no `sudo` anywhere. Simpler than the alternative, at the cost of needing to keep a terminal/background job alive per session.
-- **One passphrase prompt per session**, not per command. Everything after `hush unlock` — as many `hush run` invocations as you want — needs no further interaction.
+- **One passphrase prompt per `hush run`.** There's no background agent: each `hush run` holds its own decrypted secrets and proxy for as long as its command runs. For the main use, `hush run -- claude`, that's one prompt per session. Ctrl-C goes to the command; `hush run` ignores it and stays up for as long as the command does.
+- **No nesting.** A `hush run` inside another one refuses to start. The outer run's placeholders and proxy are already in place there.
 
 ## Threat model
 
 **What this protects against:** an AI agent (or anything running as your own user) that reads env vars, inspects config files, or is prompt-injected into printing or exfiltrating "the API key" — because the real bytes are never in its reachable process tree in the first place. Also protects the value at rest: the vault file is encrypted, so directly reading it gets ciphertext.
 
-**What this does not protect against:** something that can read `hush-agent`'s own process memory directly (rather than going through a normal file read) — this is a materially higher bar than the filesystem-based leaks it's designed to close, but it isn't a hard cryptographic guarantee. Real isolation (separate OS user, container, sandboxed agent execution) still strengthens this further and is complementary, not required.
+**Changing where a secret may go needs the passphrase.** `secret add`/`bind`/`rm` decrypt and rewrite the vault themselves, so a process started by `hush run` can't rebind a secret to a host it controls. It never has the passphrase, and `hush run` strips `HUSH_PASSPHRASE` and `HUSH_SECRET_VALUE` from its environment. Run from inside `hush run`, those commands print a warning before prompting. Only type the passphrase for a change you started yourself.
 
-**The session CA** can mint a certificate for any host, and every `hush run` child trusts it. Its key never leaves `hush-agent`'s memory and stops existing when the agent exits, so this adds nothing an attacker could steal from disk. Anything that can read that memory could already read the secrets themselves. The CA files written to `~/.config/hush/` are public certificates only.
+**What this does not protect against:** something that can read the `hush run` process's own memory directly (rather than going through a normal file read) — this is a materially higher bar than the filesystem-based leaks it's designed to close, but it isn't a hard cryptographic guarantee. Real isolation (separate OS user, container, sandboxed agent execution) still strengthens this further and is complementary, not required.
+
+**The per-run CA** can mint a certificate for any host, and the `hush run` child trusts it. Its key never leaves `hush run`'s memory and stops existing when the run ends, so this adds nothing an attacker could steal from disk. Anything that can read that memory could already read the secrets themselves. The CA files in the run directory are public certificates only.
+
+**A bound host that echoes headers back** hands the real value to whatever reads the response. That's the case for request-inspection endpoints like postman-echo, and partly for error messages that quote the key. Only bind hosts you trust with the key.
 
 **Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
 

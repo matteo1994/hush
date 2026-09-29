@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -11,14 +12,12 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use time::{Duration, OffsetDateTime};
 
-use crate::vault::{ca_bundle_path, ca_cert_path};
-
 /// Apple clients reject leaf certificates valid for longer than 398 days.
 const VALIDITY_DAYS: i64 = 397;
 
-/// Per-session interception state. The CA key is generated at `hush unlock`
-/// and only ever lives in this process's memory — it is never written to disk,
-/// so the CA stops being usable the moment the agent exits.
+/// Per-run interception state. The CA key is generated when `hush run` starts
+/// and only ever lives in its memory — it is never written to disk, so the CA
+/// stops being usable the moment the run exits.
 pub struct Mitm {
     ca: CertifiedIssuer<'static, KeyPair>,
     leaves: Mutex<HashMap<String, Arc<ServerConfig>>>,
@@ -111,31 +110,29 @@ pub fn native_roots() -> Result<(RootCertStore, Vec<CertificateDer<'static>>)> {
     Ok((store, loaded.certs))
 }
 
-/// Writes the files `hush run` points child processes at:
-/// - `ca.pem`: the session CA alone (for `NODE_EXTRA_CA_CERTS`, which appends)
-/// - `ca-bundle.pem`: system roots plus the session CA (for `SSL_CERT_FILE` and
-///   friends, which replace the default roots entirely)
-///
-/// Both contain only public certificates.
-pub fn write_trust_files(mitm: &Mitm, system_roots: &[CertificateDer<'static>]) -> Result<()> {
-    let ca_pem = to_pem(mitm.ca_der());
-    let mut bundle: String = system_roots.iter().map(to_pem).collect();
-    bundle.push_str(&ca_pem);
+pub struct TrustFiles {
+    /// The session CA alone, for `NODE_EXTRA_CA_CERTS` (which appends).
+    pub ca: PathBuf,
+    /// System roots plus the session CA, for `SSL_CERT_FILE` and friends
+    /// (which replace the default roots entirely).
+    pub bundle: PathBuf,
+}
 
-    write_atomic(&ca_cert_path()?, &ca_pem)?;
-    write_atomic(&ca_bundle_path()?, &bundle)?;
-    Ok(())
+/// Writes the CA files a child process is pointed at into `dir`. Both
+/// contain only public certificates.
+pub fn write_trust_files(mitm: &Mitm, system_roots: &[CertificateDer<'static>], dir: &Path) -> Result<TrustFiles> {
+    let ca_pem = to_pem(mitm.ca_der());
+    let mut bundle_pem: String = system_roots.iter().map(to_pem).collect();
+    bundle_pem.push_str(&ca_pem);
+
+    let files = TrustFiles { ca: dir.join("ca.pem"), bundle: dir.join("ca-bundle.pem") };
+    fs::write(&files.ca, ca_pem).with_context(|| format!("writing {}", files.ca.display()))?;
+    fs::write(&files.bundle, bundle_pem).with_context(|| format!("writing {}", files.bundle.display()))?;
+    Ok(files)
 }
 
 fn to_pem(der: &CertificateDer<'_>) -> String {
     pem::encode(&pem::Pem::new("CERTIFICATE", der.to_vec()))
-}
-
-fn write_atomic(path: &std::path::Path, contents: &str) -> Result<()> {
-    let tmp = path.with_extension("pem.tmp");
-    fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 #[cfg(test)]
