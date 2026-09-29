@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
@@ -66,7 +66,15 @@ fn handle_connection(mut client: TcpStream, table: &PlaceholderTable, mitm: &Mit
     let (host, port, path) = resolve_target(&req.path, header_value(&req.headers, "host"))?;
     let mut upstream = TcpStream::connect((host.as_str(), port))?;
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
-    forward(&mut client, &leftover, req, &path, &host, table, &mut upstream)
+    forward(
+        &mut client,
+        &leftover,
+        req,
+        &path,
+        &host,
+        table,
+        &mut upstream,
+    )
 }
 
 /// HTTPS via `CONNECT`. Hosts that some minted placeholder is bound to get
@@ -100,14 +108,26 @@ fn handle_connect(
     }
 
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
-    let server_name = ServerName::try_from(host.to_string()).with_context(|| format!("invalid host {host}"))?;
-    let mut upstream = StreamOwned::new(ClientConnection::new(mitm.upstream_config(), server_name)?, upstream);
+    let server_name =
+        ServerName::try_from(host.to_string()).with_context(|| format!("invalid host {host}"))?;
+    let mut upstream = StreamOwned::new(
+        ClientConnection::new(mitm.upstream_config(), server_name)?,
+        upstream,
+    );
     let mut client = StreamOwned::new(ServerConnection::new(mitm.server_config(host)?)?, client);
 
     let (head, leftover) = read_head(&mut client)?;
     let req = parse_head(&head)?;
     let path = req.path.clone();
-    forward(&mut client, &leftover, req, &path, host, table, &mut upstream)?;
+    forward(
+        &mut client,
+        &leftover,
+        req,
+        &path,
+        host,
+        table,
+        &mut upstream,
+    )?;
 
     client.conn.send_close_notify();
     let _ = client.flush();
@@ -173,7 +193,13 @@ fn forward<C: Read + Write, U: Read + Write>(
 }
 
 /// Headers that only make sense for the client↔proxy hop.
-const HOP_BY_HOP: &[&str] = &["proxy-connection", "proxy-authorization", "connection", "keep-alive", "expect"];
+const HOP_BY_HOP: &[&str] = &[
+    "proxy-connection",
+    "proxy-authorization",
+    "connection",
+    "keep-alive",
+    "expect",
+];
 
 #[derive(Debug, PartialEq)]
 enum Body {
@@ -189,7 +215,9 @@ fn body_framing(headers: &[(String, String)]) -> Result<Body> {
         return Ok(Body::Chunked);
     }
     match header_value(headers, "content-length") {
-        Some(v) => Ok(Body::Length(v.trim().parse().context("invalid Content-Length")?)),
+        Some(v) => Ok(Body::Length(
+            v.trim().parse().context("invalid Content-Length")?,
+        )),
         None => Ok(Body::None),
     }
 }
@@ -203,7 +231,8 @@ fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Resu
             let line = read_line(src)?;
             dst.write_all(line.as_bytes())?;
             let size = line.trim_end().split(';').next().unwrap_or("").trim();
-            let size = u64::from_str_radix(size, 16).with_context(|| format!("invalid chunk size {size:?}"))?;
+            let size = u64::from_str_radix(size, 16)
+                .with_context(|| format!("invalid chunk size {size:?}"))?;
             if size == 0 {
                 // Trailer section, terminated by an empty line.
                 loop {
@@ -285,7 +314,12 @@ fn parse_head(head: &[u8]) -> Result<Head> {
         headers: parsed
             .headers
             .iter()
-            .map(|h| (h.name.to_string(), String::from_utf8_lossy(h.value).to_string()))
+            .map(|h| {
+                (
+                    h.name.to_string(),
+                    String::from_utf8_lossy(h.value).to_string(),
+                )
+            })
             .collect(),
     })
 }
@@ -311,7 +345,8 @@ fn resolve_target(raw_path: &str, host_header: Option<&str>) -> Result<(String, 
         return Ok((host, port, path.to_string()));
     }
 
-    let authority = host_header.ok_or_else(|| anyhow::anyhow!("no Host header and no absolute-form URI"))?;
+    let authority =
+        host_header.ok_or_else(|| anyhow::anyhow!("no Host header and no absolute-form URI"))?;
     let (host, port) = split_host_port(authority, 80);
     Ok((host, port, raw_path.to_string()))
 }
@@ -324,15 +359,26 @@ fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
         },
         _ => (authority, default_port),
     };
-    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     (host.to_string(), port)
 }
 
 fn is_bound_host(table: &PlaceholderTable, host: &str) -> bool {
-    table.lock().unwrap().values().any(|e| e.host.eq_ignore_ascii_case(host))
+    table
+        .lock()
+        .unwrap()
+        .values()
+        .any(|e| e.host.eq_ignore_ascii_case(host))
 }
 
-fn substitute_placeholders(headers: &mut [(String, String)], target_host: &str, table: &PlaceholderTable) {
+fn substitute_placeholders(
+    headers: &mut [(String, String)],
+    target_host: &str,
+    table: &PlaceholderTable,
+) {
     let table = table.lock().unwrap();
     for (name, value) in headers.iter_mut() {
         let mut replacement: Option<String> = None;
@@ -370,7 +416,10 @@ mod tests {
             header: "Authorization".to_string(),
             format: "Bearer {value}".to_string(),
         };
-        Arc::new(Mutex::new(HashMap::from([(PLACEHOLDER.to_string(), entry)])))
+        Arc::new(Mutex::new(HashMap::from([(
+            PLACEHOLDER.to_string(),
+            entry,
+        )])))
     }
 
     fn auth_headers() -> Vec<(String, String)> {
@@ -435,8 +484,14 @@ mod tests {
 
     #[test]
     fn splits_host_and_port() {
-        assert_eq!(split_host_port("api.example.com:8443", 443), ("api.example.com".into(), 8443));
-        assert_eq!(split_host_port("api.example.com", 443), ("api.example.com".into(), 443));
+        assert_eq!(
+            split_host_port("api.example.com:8443", 443),
+            ("api.example.com".into(), 8443)
+        );
+        assert_eq!(
+            split_host_port("api.example.com", 443),
+            ("api.example.com".into(), 443)
+        );
         assert_eq!(split_host_port("[::1]:8080", 443), ("::1".into(), 8080));
         assert_eq!(split_host_port("[::1]", 443), ("::1".into(), 443));
     }
@@ -484,7 +539,11 @@ mod tests {
             };
             let _ = tx.send(result.ok());
         });
-        Upstream { port, cert: cert_der, received }
+        Upstream {
+            port,
+            cert: cert_der,
+            received,
+        }
     }
 
     fn echo_one<S: Read + Write>(s: &mut S) -> Result<String> {
@@ -495,7 +554,11 @@ mod tests {
             let mut src = BufReader::new(leftover.as_slice().chain(&mut *s));
             copy_body(&mut src, &mut body, body_framing(&req.headers)?)?;
         }
-        let seen = format!("{}{}", String::from_utf8_lossy(&head), String::from_utf8_lossy(&body));
+        let seen = format!(
+            "{}{}",
+            String::from_utf8_lossy(&head),
+            String::from_utf8_lossy(&body)
+        );
         write!(
             s,
             "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{seen}",
@@ -510,7 +573,10 @@ mod tests {
     }
 
     /// Starts a proxy whose upstream TLS trusts only `upstream_roots`.
-    fn start(table: PlaceholderTable, upstream_roots: &[&CertificateDer<'static>]) -> (u16, Arc<Mitm>) {
+    fn start(
+        table: PlaceholderTable,
+        upstream_roots: &[&CertificateDer<'static>],
+    ) -> (u16, Arc<Mitm>) {
         let mut roots = RootCertStore::empty();
         for cert in upstream_roots {
             roots.add((*cert).clone()).unwrap();
@@ -522,18 +588,32 @@ mod tests {
     /// Sends `CONNECT authority` and returns the tunnel plus the proxy's status line.
     fn connect(proxy_port: u16, authority: &str) -> (TcpStream, String) {
         let mut tcp = TcpStream::connect(("127.0.0.1", proxy_port)).unwrap();
-        write!(tcp, "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").unwrap();
+        write!(
+            tcp,
+            "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"
+        )
+        .unwrap();
         let (head, _) = read_head(&mut tcp).unwrap();
-        let status = String::from_utf8_lossy(&head).lines().next().unwrap_or("").to_string();
+        let status = String::from_utf8_lossy(&head)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
         (tcp, status)
     }
 
     /// TLS client over `tcp`, verifying the server as `localhost` against `trust` only.
-    fn tls_client(tcp: TcpStream, trust: &CertificateDer<'static>) -> StreamOwned<ClientConnection, TcpStream> {
+    fn tls_client(
+        tcp: TcpStream,
+        trust: &CertificateDer<'static>,
+    ) -> StreamOwned<ClientConnection, TcpStream> {
         let mut roots = RootCertStore::empty();
         roots.add(trust.clone()).unwrap();
-        let cfg = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
-        let conn = ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap()).unwrap();
+        let cfg = ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let conn = ClientConnection::new(Arc::new(cfg), ServerName::try_from("localhost").unwrap())
+            .unwrap();
         StreamOwned::new(conn, tcp)
     }
 
@@ -576,7 +656,10 @@ mod tests {
         roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
 
         let seen = received(&up).unwrap();
-        assert!(seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")), "{seen}");
+        assert!(
+            seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")),
+            "{seen}"
+        );
     }
 
     #[test]
@@ -590,7 +673,10 @@ mod tests {
         roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
 
         let seen = received(&up).unwrap();
-        assert!(seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")), "{seen}");
+        assert!(
+            seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")),
+            "{seen}"
+        );
         assert!(!seen.contains("REAL"), "{seen}");
     }
 
@@ -631,32 +717,51 @@ mod tests {
         assert!(seen.contains("authorization: bearer real\r\n"), "{seen}");
         assert!(seen.contains("connection: close\r\n"), "{seen}");
         assert!(seen.ends_with("\r\n\r\nhello"), "{seen}");
-        for stripped in ["proxy-authorization", "keep-alive", "expect", "connection: keep-alive"] {
-            assert!(!seen.contains(stripped), "{stripped} leaked upstream: {seen}");
+        for stripped in [
+            "proxy-authorization",
+            "keep-alive",
+            "expect",
+            "connection: keep-alive",
+        ] {
+            assert!(
+                !seen.contains(stripped),
+                "{stripped} leaked upstream: {seen}"
+            );
         }
     }
 
     #[test]
     fn plain_http_swaps_only_for_bound_host() {
-        for (bound, expected) in [("localhost", "Bearer REAL"), ("api.example.com", "Bearer hush_ph_test")] {
+        for (bound, expected) in [
+            ("localhost", "Bearer REAL"),
+            ("api.example.com", "Bearer hush_ph_test"),
+        ] {
             let up = spawn_upstream(false);
             let (proxy, _mitm) = start(table_bound_to(bound), &[]);
 
             let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
-            let request = chunked_post().replacen("/v1", &format!("http://localhost:{}/v1", up.port), 1);
+            let request =
+                chunked_post().replacen("/v1", &format!("http://localhost:{}/v1", up.port), 1);
             let resp = roundtrip(&mut tcp, &request);
             assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
 
             let seen = received(&up).unwrap();
             assert!(seen.starts_with("POST /v1 HTTP/1.1\r\n"), "{seen}");
-            assert!(seen.contains(&format!("Authorization: {expected}\r\n")), "bound={bound}: {seen}");
+            assert!(
+                seen.contains(&format!("Authorization: {expected}\r\n")),
+                "bound={bound}: {seen}"
+            );
             assert!(seen.ends_with("5\r\nhello\r\n0\r\n\r\n"), "{seen}");
         }
     }
 
     #[test]
     fn connect_to_unreachable_host_returns_502() {
-        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let (proxy, _mitm) = start(table_bound_to("localhost"), &[]);
         let (_, status) = connect(proxy, &format!("127.0.0.1:{port}"));
         assert!(status.starts_with("HTTP/1.1 502"), "{status}");

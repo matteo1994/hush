@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
-    KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
+    KeyPair, KeyUsagePurpose,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
@@ -29,7 +29,9 @@ impl Mitm {
     /// connects to on the child's behalf.
     pub fn new(upstream_roots: RootCertStore) -> Result<Self> {
         let mut params = CertificateParams::new(Vec::<String>::new())?;
-        params.distinguished_name.push(DnType::CommonName, "hush session CA");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "hush session CA");
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         set_validity(&mut params);
@@ -80,7 +82,10 @@ impl Mitm {
     fn issue_leaf(&self, host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let mut params = CertificateParams::new(vec![host.to_string()])?;
         params.distinguished_name.push(DnType::CommonName, host);
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         // Required by OpenSSL's strict verification, the default since Python 3.13.
         params.use_authority_key_identifier_extension = true;
@@ -120,14 +125,22 @@ pub struct TrustFiles {
 
 /// Writes the CA files a child process is pointed at into `dir`. Both
 /// contain only public certificates.
-pub fn write_trust_files(mitm: &Mitm, system_roots: &[CertificateDer<'static>], dir: &Path) -> Result<TrustFiles> {
+pub fn write_trust_files(
+    mitm: &Mitm,
+    system_roots: &[CertificateDer<'static>],
+    dir: &Path,
+) -> Result<TrustFiles> {
     let ca_pem = to_pem(mitm.ca_der());
     let mut bundle_pem: String = system_roots.iter().map(to_pem).collect();
     bundle_pem.push_str(&ca_pem);
 
-    let files = TrustFiles { ca: dir.join("ca.pem"), bundle: dir.join("ca-bundle.pem") };
+    let files = TrustFiles {
+        ca: dir.join("ca.pem"),
+        bundle: dir.join("ca-bundle.pem"),
+    };
     fs::write(&files.ca, ca_pem).with_context(|| format!("writing {}", files.ca.display()))?;
-    fs::write(&files.bundle, bundle_pem).with_context(|| format!("writing {}", files.bundle.display()))?;
+    fs::write(&files.bundle, bundle_pem)
+        .with_context(|| format!("writing {}", files.bundle.display()))?;
     Ok(files)
 }
 
@@ -150,10 +163,20 @@ mod tests {
     fn session_ca_is_a_ca_limited_to_leaves() {
         let m = mitm();
         let (_, ca) = parse_x509_certificate(m.ca_der()).unwrap();
-        let bc = ca.basic_constraints().unwrap().expect("basic constraints").value;
+        let bc = ca
+            .basic_constraints()
+            .unwrap()
+            .expect("basic constraints")
+            .value;
         assert!(bc.ca);
         assert_eq!(bc.path_len_constraint, Some(0));
-        assert!(ca.key_usage().unwrap().expect("key usage").value.key_cert_sign());
+        assert!(
+            ca.key_usage()
+                .unwrap()
+                .expect("key usage")
+                .value
+                .key_cert_sign()
+        );
     }
 
     /// Guards the fields strict clients check: a missing AKI broke Python 3.13+,
@@ -168,14 +191,24 @@ mod tests {
         assert_eq!(leaf.issuer(), ca.subject());
         assert!(!leaf.is_ca());
         assert!(
-            leaf.extensions()
-                .iter()
-                .any(|e| matches!(e.parsed_extension(), ParsedExtension::AuthorityKeyIdentifier(_))),
+            leaf.extensions().iter().any(|e| matches!(
+                e.parsed_extension(),
+                ParsedExtension::AuthorityKeyIdentifier(_)
+            )),
             "leaf must carry an Authority Key Identifier"
         );
-        assert!(leaf.extended_key_usage().unwrap().expect("EKU").value.server_auth);
+        assert!(
+            leaf.extended_key_usage()
+                .unwrap()
+                .expect("EKU")
+                .value
+                .server_auth
+        );
         let san = leaf.subject_alternative_name().unwrap().expect("SAN").value;
-        assert_eq!(san.general_names, vec![GeneralName::DNSName("api.example.com")]);
+        assert_eq!(
+            san.general_names,
+            vec![GeneralName::DNSName("api.example.com")]
+        );
 
         let v = leaf.validity();
         let days = (v.not_after.timestamp() - v.not_before.timestamp()) / 86_400;

@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use age::secrecy::SecretString;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,7 +27,12 @@ fn default_format() -> String {
 }
 
 impl Binding {
-    pub fn new(host: String, env: Option<String>, header: Option<String>, format: Option<String>) -> Self {
+    pub fn new(
+        host: String,
+        env: Option<String>,
+        header: Option<String>,
+        format: Option<String>,
+    ) -> Self {
         Binding {
             host,
             env,
@@ -56,7 +61,11 @@ impl Vault {
         }
     }
 
-    pub fn find_binding<'a>(&'a self, name: &str, env: Option<&str>) -> Option<(&'a SecretEntry, &'a Binding)> {
+    pub fn find_binding<'a>(
+        &'a self,
+        name: &str,
+        env: Option<&str>,
+    ) -> Option<(&'a SecretEntry, &'a Binding)> {
         let entry = self.secrets.get(name)?;
         // Prefer an exact env match, then fall back to an unscoped binding.
         let exact = entry
@@ -104,7 +113,8 @@ pub fn init_vault(passphrase: &str) -> Result<()> {
 
 pub fn load_vault(passphrase: &str) -> Result<Vault> {
     let path = vault_path()?;
-    let encrypted = fs::read(&path).with_context(|| format!("reading vault at {}", path.display()))?;
+    let encrypted =
+        fs::read(&path).with_context(|| format!("reading vault at {}", path.display()))?;
 
     let decryptor = age::Decryptor::new(&encrypted[..])?;
     let identity = age::scrypt::Identity::new(SecretString::from(passphrase.to_string()));
@@ -115,7 +125,8 @@ pub fn load_vault(passphrase: &str) -> Result<Vault> {
         .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupted vault"))?;
     reader.read_to_end(&mut decrypted)?;
 
-    let vault: Vault = serde_json::from_slice(&decrypted).context("vault contents are not valid")?;
+    let vault: Vault =
+        serde_json::from_slice(&decrypted).context("vault contents are not valid")?;
     Ok(vault)
 }
 
