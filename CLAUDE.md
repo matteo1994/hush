@@ -11,10 +11,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build                 # debug build
 cargo build --release
-cargo clippy
+cargo fmt
+cargo clippy --all-targets -- -D warnings
 cargo test                  # proxy unit tests + in-process TLS end-to-end tests
 cargo test <name>           # run a single test by name filter
 ```
+
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, the clippy line above and `cargo test --locked` on Linux and macOS, using the toolchain from `rust-toolchain.toml`.
 
 Toolchain is pinned to nightly via `rust-toolchain.toml` (rustup). Unix-only (`PermissionsExt`, `ExitStatusExt`, `libc` signals). Rust edition 2024.
 
