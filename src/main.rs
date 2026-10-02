@@ -1,9 +1,9 @@
+mod names;
 mod proxy;
 mod run;
 mod tls;
 mod vault;
 
-use std::fs;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
@@ -47,6 +47,10 @@ enum Command {
     Run {
         #[arg(long)]
         env: Option<String>,
+        /// Also hand this secret to the command, on top of the project's
+        /// `.env` and ~/.config/hush/global.env. Repeatable.
+        #[arg(long = "secret", value_name = "NAME")]
+        secrets: Vec<String>,
         #[arg(last = true, required = true)]
         cmd: Vec<String>,
     },
@@ -99,8 +103,9 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => cmd_init(),
         Command::Secret { action } => cmd_secret(action),
-        Command::Run { env, cmd } => {
-            let names = find_managed_keys()?;
+        Command::Run { env, secrets, cmd } => {
+            let cwd = std::env::current_dir()?;
+            let names = names::collect(&cwd, &vault::global_env_path()?, &secrets)?;
             run::run(names, env, cmd, passphrase)
         }
     }
@@ -211,44 +216,4 @@ fn describe(b: &Binding) -> String {
         "[{env}] host={} header={} format=\"{}\"",
         b.host, b.header, b.format
     )
-}
-
-/// Scans `.env` in the current directory for `_KEY`-suffixed names.
-/// Values are ignored entirely — hush never reads a real secret from `.env`.
-fn find_managed_keys() -> Result<Vec<String>> {
-    let path = std::path::Path::new(".env");
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-    Ok(managed_keys(&fs::read_to_string(path)?))
-}
-
-fn managed_keys(dotenv: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in dotenv.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, _)) = line.split_once('=')
-            && key.trim().ends_with("_KEY")
-        {
-            names.push(key.trim().to_string());
-        }
-    }
-    names
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn managed_keys_are_key_suffixed_names_only() {
-        let dotenv = "# comment\n\nBILLING_API_KEY=\n  STRIPE_SECRET_KEY = sk_ignored\nDATABASE_URL=postgres://\nKEYRING=x\nnot a pair\n";
-        assert_eq!(
-            managed_keys(dotenv),
-            vec!["BILLING_API_KEY", "STRIPE_SECRET_KEY"]
-        );
-    }
 }

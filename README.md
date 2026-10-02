@@ -28,15 +28,23 @@ That last part is the actual security property: even if an agent is prompt-injec
 
 ### Which secrets get exposed to a given command
 
-`hush run` doesn't take a list of secret names on the command line. Instead, it reads `.env` in the current directory and auto-detects any variable name ending in `_KEY`:
+A `hush run` gets a placeholder for every name from three sources:
 
-```bash
-# .env — safe to commit, no real values live here
-BILLING_API_KEY=
-STRIPE_SECRET_KEY=
-```
+1. **The project's `.env`**: names ending in `_KEY`, since `.env` usually holds other settings too. hush looks in the current directory and then upward to the git root, so it works from subdirectories. Outside a git repo it checks only the current directory.
 
-Each `_KEY`-suffixed name found there is cross-referenced against what's actually registered in the vault (filtered by `--env` if given); anything not registered is silently skipped, and anything registered but not listed in `.env` is never exposed to that project. `.env`'s value column is ignored entirely — the real value only ever lives in the vault.
+   ```bash
+   # .env — safe to commit, no real values live here
+   BILLING_API_KEY=
+   export STRIPE_SECRET_KEY=
+   ```
+
+2. **`~/.config/hush/global.env`**: every name it lists, in every `hush run`, wherever it starts. This is for secrets that belong to a globally installed tool rather than a project, such as `TYPESAFE_API_KEY` for `mile crew`.
+
+3. **`--secret NAME`** (repeatable), for one-off commands: `hush run --secret TYPESAFE_API_KEY -- mile crew judge`.
+
+Each name is looked up in the vault (filtered by `--env` if given). Names with no matching binding are skipped with a warning. Value columns are ignored entirely: the real value only ever lives in the vault. If no source names anything, `hush run` doesn't ask for the passphrase at all.
+
+None of this is a security boundary. Any process in the project can edit `.env`, so it only decides which placeholders a run hands out. What protects a secret is its host binding: a placeholder only becomes the real value on the way to that host.
 
 ### HTTPS
 
@@ -68,6 +76,7 @@ hush secret rm BILLING_API_KEY
 
 # Run something with managed secrets in scope, none of them ever in its real form
 hush run -- python billing_client.py
+hush run --secret TYPESAFE_API_KEY -- mile crew judge   # a secret not listed in any .env
 hush run --env staging -- ./deploy.sh
 hush run -- claude                          # a coding agent and everything it starts
 ```
