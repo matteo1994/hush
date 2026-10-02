@@ -87,6 +87,12 @@ pub fn vault_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("vault.age"))
 }
 
+/// Names (never values) of secrets every `hush run` should get, wherever
+/// it's started; same format as `.env`.
+pub fn global_env_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("global.env"))
+}
+
 /// Parent of the per-`hush run` directories holding that run's CA files.
 pub fn runs_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("runs"))
