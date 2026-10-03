@@ -59,6 +59,10 @@ The CA is generated when `hush run` starts and its private key only ever exists 
 
 `NODE_USE_ENV_PROXY=1` is also set, so Node 24.5+ honors the proxy variables.
 
+### Plain HTTP
+
+A plain-HTTP request to a bound host only gets the real value when the proxy's upstream connection is to a loopback address, such as a local dev server. Anywhere else the key would cross the network unencrypted, so the placeholder goes out verbatim instead. To allow that for a host you trust anyway, such as one on a private network, bind it with `--allow-http`.
+
 ## Usage
 
 ```bash
@@ -69,7 +73,7 @@ hush init                                   # create a new vault, set its passph
 hush secret add BILLING_API_KEY --host api.example.com
 
 # Add another binding for a different environment
-hush secret bind BILLING_API_KEY --host billing-staging.internal --env staging
+hush secret bind BILLING_API_KEY --host billing-staging.internal --env staging --allow-http
 
 hush secret ls                              # list names + bindings, never values
 hush secret rm BILLING_API_KEY

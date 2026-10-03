@@ -16,6 +16,10 @@ pub struct Binding {
     pub header: String,
     #[serde(default = "default_format")]
     pub format: String,
+    /// Also swap over plain HTTP to a non-loopback host, where the real value
+    /// crosses the network unencrypted.
+    #[serde(default)]
+    pub allow_http: bool,
 }
 
 fn default_header() -> String {
@@ -32,12 +36,14 @@ impl Binding {
         env: Option<String>,
         header: Option<String>,
         format: Option<String>,
+        allow_http: bool,
     ) -> Self {
         Binding {
             host,
             env,
             header: header.unwrap_or_else(default_header),
             format: format.unwrap_or_else(default_format),
+            allow_http,
         }
     }
 }
