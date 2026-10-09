@@ -17,6 +17,7 @@ pub struct PlaceholderEntry {
     pub host: String,
     pub header: String,
     pub format: String,
+    pub allow_http: bool,
 }
 
 pub type PlaceholderTable = Arc<Mutex<HashMap<String, PlaceholderEntry>>>;
@@ -66,12 +67,16 @@ fn handle_connection(mut client: TcpStream, table: &PlaceholderTable, mitm: &Mit
     let (host, port, path) = resolve_target(&req.path, header_value(&req.headers, "host"))?;
     let mut upstream = TcpStream::connect((host.as_str(), port))?;
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
+    // Judged by the address actually connected to, not the name, so a bound
+    // name that resolves off-machine doesn't count as local.
+    let leaves_machine = !upstream.peer_addr()?.ip().to_canonical().is_loopback();
     forward(
         &mut client,
         &leftover,
         req,
         &path,
         &host,
+        leaves_machine,
         table,
         &mut upstream,
     )
@@ -125,6 +130,7 @@ fn handle_connect(
         req,
         &path,
         host,
+        false,
         table,
         &mut upstream,
     )?;
@@ -151,12 +157,15 @@ fn tunnel(mut client: TcpStream, leftover: &[u8], mut upstream: TcpStream) -> Re
 /// Forwards one request and relays its response. The request is sent with
 /// `Connection: close`, so the response ends at upstream EOF and the client
 /// opens a fresh connection (and fresh substitution) for its next request.
+/// `cleartext` means the request crosses the network unencrypted.
+#[allow(clippy::too_many_arguments)]
 fn forward<C: Read + Write, U: Read + Write>(
     client: &mut C,
     leftover: &[u8],
     req: Head,
     path: &str,
     target_host: &str,
+    cleartext: bool,
     table: &PlaceholderTable,
     upstream: &mut U,
 ) -> Result<()> {
@@ -166,7 +175,7 @@ fn forward<C: Read + Write, U: Read + Write>(
     });
 
     let mut headers = req.headers;
-    substitute_placeholders(&mut headers, target_host, table);
+    substitute_placeholders(&mut headers, target_host, cleartext, table);
     headers.retain(|(k, _)| !HOP_BY_HOP.iter().any(|h| k.eq_ignore_ascii_case(h)));
     headers.push(("Connection".to_string(), "close".to_string()));
 
@@ -374,16 +383,20 @@ fn is_bound_host(table: &PlaceholderTable, host: &str) -> bool {
         .any(|e| e.host.eq_ignore_ascii_case(host))
 }
 
+/// A `cleartext` request (plain HTTP off this machine) only gets the real
+/// value for bindings that opted in with `allow_http`; otherwise the
+/// placeholder goes out verbatim, as for any other non-matching request.
 fn substitute_placeholders(
     headers: &mut [(String, String)],
     target_host: &str,
+    cleartext: bool,
     table: &PlaceholderTable,
 ) {
     let table = table.lock().unwrap();
     for (name, value) in headers.iter_mut() {
         let mut replacement: Option<String> = None;
         for (placeholder, entry) in table.iter() {
-            if !name.eq_ignore_ascii_case(&entry.header) {
+            if !name.eq_ignore_ascii_case(&entry.header) || (cleartext && !entry.allow_http) {
                 continue;
             }
             let expected = entry.format.replace("{value}", placeholder);
@@ -410,11 +423,16 @@ mod tests {
     const PLACEHOLDER: &str = "hush_ph_test";
 
     fn table_bound_to(host: &str) -> PlaceholderTable {
+        table_with(host, false)
+    }
+
+    fn table_with(host: &str, allow_http: bool) -> PlaceholderTable {
         let entry = PlaceholderEntry {
             real_value: "REAL".to_string(),
             host: host.to_string(),
             header: "Authorization".to_string(),
             format: "Bearer {value}".to_string(),
+            allow_http,
         };
         Arc::new(Mutex::new(HashMap::from([(
             PLACEHOLDER.to_string(),
@@ -431,11 +449,11 @@ mod tests {
         let table = table_bound_to("api.example.com");
 
         let mut h = auth_headers();
-        substitute_placeholders(&mut h, "API.example.com", &table);
+        substitute_placeholders(&mut h, "API.example.com", false, &table);
         assert_eq!(h[0].1, "Bearer REAL");
 
         let mut h = auth_headers();
-        substitute_placeholders(&mut h, "evil.example.com", &table);
+        substitute_placeholders(&mut h, "evil.example.com", false, &table);
         assert_eq!(h[0].1, format!("Bearer {PLACEHOLDER}"));
     }
 
@@ -444,12 +462,29 @@ mod tests {
         let table = table_bound_to("api.example.com");
 
         let mut h = vec![("X-Api-Key".to_string(), format!("Bearer {PLACEHOLDER}"))];
-        substitute_placeholders(&mut h, "api.example.com", &table);
+        substitute_placeholders(&mut h, "api.example.com", false, &table);
         assert_eq!(h[0].1, format!("Bearer {PLACEHOLDER}"));
 
         let mut h = vec![("Authorization".to_string(), format!("Token {PLACEHOLDER}"))];
-        substitute_placeholders(&mut h, "api.example.com", &table);
+        substitute_placeholders(&mut h, "api.example.com", false, &table);
         assert_eq!(h[0].1, format!("Token {PLACEHOLDER}"));
+    }
+
+    #[test]
+    fn cleartext_swaps_only_with_allow_http() {
+        for (allow_http, expected) in [
+            (false, format!("Bearer {PLACEHOLDER}")),
+            (true, "Bearer REAL".to_string()),
+        ] {
+            let mut h = auth_headers();
+            substitute_placeholders(
+                &mut h,
+                "api.example.com",
+                true,
+                &table_with("api.example.com", allow_http),
+            );
+            assert_eq!(h[0].1, expected, "allow_http={allow_http}");
+        }
     }
 
     #[test]

@@ -46,6 +46,7 @@ pub fn mint(vault: &Vault, names: &[String], env: Option<&str>) -> Minted {
                         host: binding.host.clone(),
                         header: binding.header.clone(),
                         format: binding.format.clone(),
+                        allow_http: binding.allow_http,
                     },
                 );
                 minted.placeholders.insert(name.clone(), placeholder);
@@ -241,12 +242,13 @@ mod tests {
             SecretEntry {
                 value: "REAL".to_string(),
                 bindings: vec![
-                    Binding::new("api.example.com".into(), None, None, None),
+                    Binding::new("api.example.com".into(), None, None, None, false),
                     Binding::new(
                         "staging.example.com".into(),
                         Some("staging".into()),
                         Some("X-Key".into()),
                         Some("{value}".into()),
+                        false,
                     ),
                 ],
             },
@@ -255,7 +257,13 @@ mod tests {
             "UNUSED_KEY".to_string(),
             SecretEntry {
                 value: "OTHER".to_string(),
-                bindings: vec![Binding::new("other.example.com".into(), None, None, None)],
+                bindings: vec![Binding::new(
+                    "other.example.com".into(),
+                    None,
+                    None,
+                    None,
+                    false,
+                )],
             },
         );
         v

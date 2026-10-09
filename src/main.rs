@@ -69,6 +69,10 @@ enum SecretAction {
         header: Option<String>,
         #[arg(long)]
         format: Option<String>,
+        /// Also swap over plain HTTP to a non-loopback host, sending the real
+        /// value unencrypted. Off by default.
+        #[arg(long)]
+        allow_http: bool,
     },
     /// Add another host binding to an existing secret.
     Bind {
@@ -81,6 +85,10 @@ enum SecretAction {
         header: Option<String>,
         #[arg(long)]
         format: Option<String>,
+        /// Also swap over plain HTTP to a non-loopback host, sending the real
+        /// value unencrypted. Off by default.
+        #[arg(long)]
+        allow_http: bool,
     },
     /// Remove a secret.
     Rm { name: String },
@@ -154,8 +162,9 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             env,
             header,
             format,
+            allow_http,
         } => {
-            let binding = Binding::new(host, env, header, format);
+            let binding = Binding::new(host, env, header, format, allow_http);
             eprintln!("adding {name}, bound to {}", describe(&binding));
             let pass = passphrase()?;
             let mut v = vault::load_vault(&pass)?;
@@ -175,8 +184,9 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             env,
             header,
             format,
+            allow_http,
         } => {
-            let binding = Binding::new(host, env, header, format);
+            let binding = Binding::new(host, env, header, format, allow_http);
             eprintln!("binding {name} to {}", describe(&binding));
             let pass = passphrase()?;
             let mut v = vault::load_vault(&pass)?;
@@ -212,8 +222,9 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
 
 fn describe(b: &Binding) -> String {
     let env = b.env.as_deref().unwrap_or("default");
+    let http = if b.allow_http { " allow-http" } else { "" };
     format!(
-        "[{env}] host={} header={} format=\"{}\"",
+        "[{env}] host={} header={} format=\"{}\"{http}",
         b.host, b.header, b.format
     )
 }
