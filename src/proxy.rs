@@ -178,6 +178,15 @@ fn forward<C: Read + Write, U: Read + Write>(
     substitute_placeholders(&mut headers, target_host, cleartext, table);
     headers.retain(|(k, _)| !HOP_BY_HOP.iter().any(|h| k.eq_ignore_ascii_case(h)));
     headers.push(("Connection".to_string(), "close".to_string()));
+    let scrubber = if is_bound_host(table, target_host) {
+        // A missing Accept-Encoding means any coding is acceptable, so ask for
+        // `identity` explicitly: a compressed response can't be scanned.
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("accept-encoding"));
+        headers.push(("Accept-Encoding".to_string(), "identity".to_string()));
+        Scrubber::new(real_values(table))
+    } else {
+        Scrubber::new(Vec::new())
+    };
 
     let mut out = format!("{} {path} HTTP/1.1\r\n", req.method);
     for (k, v) in &headers {
@@ -198,7 +207,7 @@ fn forward<C: Read + Write, U: Read + Write>(
     }
     upstream.flush()?;
 
-    relay_until_eof(upstream, client)
+    relay_until_eof(upstream, client, scrubber)
 }
 
 /// Headers that only make sense for the client↔proxy hop.
@@ -272,7 +281,11 @@ fn read_line<R: BufRead>(src: &mut R) -> Result<String> {
     Ok(line)
 }
 
-fn relay_until_eof<U: Read, C: Write>(upstream: &mut U, client: &mut C) -> Result<()> {
+fn relay_until_eof<U: Read, C: Write>(
+    upstream: &mut U,
+    client: &mut C,
+    mut scrubber: Scrubber,
+) -> Result<()> {
     let mut buf = [0u8; 16 * 1024];
     loop {
         let n = match upstream.read(&mut buf) {
@@ -284,10 +297,78 @@ fn relay_until_eof<U: Read, C: Write>(upstream: &mut U, client: &mut C) -> Resul
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         };
-        client.write_all(&buf[..n])?;
+        client.write_all(&scrubber.feed(&buf[..n]))?;
     }
+    client.write_all(&scrubber.finish())?;
     client.flush()?;
     Ok(())
+}
+
+/// Replaces every real value in a byte stream with a marker of the same
+/// length, so a bound host that echoes the key back (an error message quoting
+/// it, a request-inspection endpoint) can't hand it to the child. Same length
+/// keeps `Content-Length` and chunk sizes valid. The stream is scanned raw, so
+/// this covers the response head as well as the body; a value split by chunk
+/// framing or escaped by the server isn't caught.
+struct Scrubber {
+    secrets: Vec<Vec<u8>>,
+    /// Bytes not yet released, so a value split across reads is still caught.
+    pending: Vec<u8>,
+    /// How many trailing bytes could be the start of a value: longest − 1.
+    hold: usize,
+}
+
+const REDACTED: &[u8] = b"HUSH_REDACTED";
+
+impl Scrubber {
+    fn new(secrets: Vec<String>) -> Self {
+        let secrets: Vec<Vec<u8>> = secrets
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(String::into_bytes)
+            .collect();
+        let hold = secrets.iter().map(Vec::len).max().unwrap_or(1) - 1;
+        Scrubber {
+            secrets,
+            pending: Vec::new(),
+            hold,
+        }
+    }
+
+    /// Returns the bytes that are safe to release now.
+    fn feed(&mut self, data: &[u8]) -> Vec<u8> {
+        self.pending.extend_from_slice(data);
+        self.redact();
+        let keep = self.hold.min(self.pending.len());
+        let rest = self.pending.split_off(self.pending.len() - keep);
+        std::mem::replace(&mut self.pending, rest)
+    }
+
+    /// Releases whatever is still held back, at end of stream.
+    fn finish(&mut self) -> Vec<u8> {
+        self.redact();
+        std::mem::take(&mut self.pending)
+    }
+
+    fn redact(&mut self) {
+        for secret in &self.secrets {
+            let mut from = 0;
+            while let Some(pos) = self.pending[from..]
+                .windows(secret.len())
+                .position(|w| w == secret.as_slice())
+            {
+                let start = from + pos;
+                let marker = REDACTED.iter().chain(std::iter::repeat(&b'*'));
+                for (b, m) in self.pending[start..start + secret.len()]
+                    .iter_mut()
+                    .zip(marker)
+                {
+                    *b = *m;
+                }
+                from = start + secret.len();
+            }
+        }
+    }
 }
 
 /// Reads bytes until the header terminator is found, returning
@@ -373,6 +454,15 @@ fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
     (host.to_string(), port)
+}
+
+fn real_values(table: &PlaceholderTable) -> Vec<String> {
+    table
+        .lock()
+        .unwrap()
+        .values()
+        .map(|e| e.real_value.clone())
+        .collect()
 }
 
 fn is_bound_host(table: &PlaceholderTable, host: &str) -> bool {
@@ -485,6 +575,55 @@ mod tests {
             );
             assert_eq!(h[0].1, expected, "allow_http={allow_http}");
         }
+    }
+
+    fn scrub_in_pieces(secrets: &[&str], pieces: &[&str]) -> String {
+        let mut scrubber = Scrubber::new(secrets.iter().map(|s| s.to_string()).collect());
+        let mut out = Vec::new();
+        for piece in pieces {
+            out.extend(scrubber.feed(piece.as_bytes()));
+        }
+        out.extend(scrubber.finish());
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn scrubber_redacts_with_same_length_marker() {
+        assert_eq!(
+            scrub_in_pieces(&["sk-0123456789abcdef"], &["key=sk-0123456789abcdef;"]),
+            "key=HUSH_REDACTED******;"
+        );
+        assert_eq!(
+            scrub_in_pieces(&["REAL"], &["a REAL b REAL"]),
+            "a HUSH b HUSH"
+        );
+        assert_eq!(scrub_in_pieces(&[], &["a REAL b"]), "a REAL b");
+    }
+
+    #[test]
+    fn scrubber_catches_a_value_split_across_reads() {
+        let secret = "sk-0123456789abcdef";
+        let text = format!("xx{secret}yy{secret}");
+        let expected = text.replace(secret, "HUSH_REDACTED******");
+        for split in 0..=text.len() {
+            let (a, b) = text.split_at(split);
+            assert_eq!(
+                scrub_in_pieces(&[secret], &[a, b]),
+                expected,
+                "split={split}"
+            );
+        }
+        let bytes: Vec<String> = text.chars().map(String::from).collect();
+        let pieces: Vec<&str> = bytes.iter().map(String::as_str).collect();
+        assert_eq!(scrub_in_pieces(&[secret], &pieces), expected);
+    }
+
+    #[test]
+    fn scrubber_handles_several_values_of_different_lengths() {
+        assert_eq!(
+            scrub_in_pieces(&["ab", "longer-secret"], &["ab longer-", "secret ab"]),
+            "HU HUSH_REDACTED HU"
+        );
     }
 
     #[test]
@@ -655,7 +794,7 @@ mod tests {
     fn roundtrip<S: Read + Write>(s: &mut S, request: &str) -> String {
         s.write_all(request.as_bytes()).unwrap();
         let mut resp = Vec::new();
-        let _ = relay_until_eof(s, &mut resp);
+        let _ = relay_until_eof(s, &mut resp, Scrubber::new(Vec::new()));
         String::from_utf8_lossy(&resp).into_owned()
     }
 
@@ -679,6 +818,27 @@ mod tests {
         let seen = received(&up).unwrap();
         assert!(seen.contains("Authorization: Bearer REAL\r\n"), "{seen}");
         assert!(seen.ends_with("5\r\nhello\r\n0\r\n\r\n"), "{seen}");
+        // The upstream echoes the swapped header back; the child must not see it.
+        assert!(resp.contains("Authorization: Bearer HUSH\r\n"), "{resp}");
+        assert!(!resp.contains("REAL"), "{resp}");
+    }
+
+    #[test]
+    fn bound_host_is_asked_for_an_uncompressed_response() {
+        let up = spawn_upstream(true);
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let request = chunked_post().replacen(
+            "Transfer-Encoding",
+            "Accept-Encoding: gzip, br\r\nTransfer-Encoding",
+            1,
+        );
+        roundtrip(&mut tls_client(tcp, mitm.ca_der()), &request);
+
+        let seen = received(&up).unwrap().to_ascii_lowercase();
+        assert!(seen.contains("accept-encoding: identity\r\n"), "{seen}");
+        assert!(!seen.contains("gzip"), "{seen}");
     }
 
     #[test]
@@ -779,6 +939,8 @@ mod tests {
                 chunked_post().replacen("/v1", &format!("http://localhost:{}/v1", up.port), 1);
             let resp = roundtrip(&mut tcp, &request);
             assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+
+            assert!(!resp.contains("REAL"), "{resp}");
 
             let seen = received(&up).unwrap();
             assert!(seen.starts_with("POST /v1 HTTP/1.1\r\n"), "{seen}");
