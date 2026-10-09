@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail};
@@ -55,6 +55,22 @@ pub struct SecretEntry {
     pub bindings: Vec<Binding>,
 }
 
+impl SecretEntry {
+    /// Adds a binding, refusing a second one for the same env: `find_binding`
+    /// only ever uses the first, so the new one would be silently ignored.
+    pub fn add_binding(&mut self, binding: Binding) -> Result<()> {
+        if let Some(existing) = self.bindings.iter().find(|b| b.env == binding.env) {
+            bail!(
+                "already bound to {} for env {}; to change that, `hush secret rm` the secret and add it again",
+                existing.host,
+                binding.env.as_deref().unwrap_or("default")
+            );
+        }
+        self.bindings.push(binding);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Vault {
     pub secrets: HashMap<String, SecretEntry>,
@@ -104,6 +120,48 @@ pub fn runs_dir() -> Result<PathBuf> {
     Ok(config_dir()?.join("runs"))
 }
 
+/// Held across a load-modify-save, so two `hush secret` commands running at
+/// once can't each save over the other's change. Released when dropped.
+pub struct VaultLock {
+    _file: fs::File,
+}
+
+/// Takes the vault lock, waiting for another hush command that holds it. The
+/// lock is a separate file because saving replaces `vault.age` by rename.
+pub fn lock_vault() -> Result<VaultLock> {
+    let path = config_dir()?.join("vault.lock");
+    if let Some(lock) = try_lock_at(&path)? {
+        return Ok(lock);
+    }
+    eprintln!("hush: waiting for another hush command to finish changing the vault");
+    let file = open_lock_file(&path)?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(VaultLock { _file: file })
+}
+
+fn try_lock_at(path: &Path) -> Result<Option<VaultLock>> {
+    let file = open_lock_file(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(VaultLock { _file: file })),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => {
+            Err(e).with_context(|| format!("locking {}", path.display()))
+        }
+    }
+}
+
+fn open_lock_file(path: &Path) -> Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
 pub fn vault_exists() -> Result<bool> {
     Ok(vault_path()?.exists())
 }
@@ -112,6 +170,7 @@ pub fn init_vault(passphrase: &str) -> Result<()> {
     let dir = config_dir()?;
     fs::create_dir_all(&dir)?;
     set_private_mode(&dir)?;
+    let _lock = lock_vault()?;
 
     let path = vault_path()?;
     if path.exists() {
@@ -172,4 +231,54 @@ fn set_owner_only(path: &PathBuf) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_binding_refuses_a_second_binding_for_the_same_env() {
+        let bind = |host: &str, env: Option<&str>| {
+            Binding::new(host.into(), env.map(Into::into), None, None, false)
+        };
+        let mut entry = SecretEntry {
+            value: "REAL".into(),
+            bindings: vec![bind("api.example.com", None)],
+        };
+        entry
+            .add_binding(bind("staging.example.com", Some("staging")))
+            .unwrap();
+
+        let err = entry
+            .add_binding(bind("evil.example.com", None))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("api.example.com for env default"),
+            "{err}"
+        );
+        let err = entry
+            .add_binding(bind("evil.example.com", Some("staging")))
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("staging.example.com for env staging"),
+            "{err}"
+        );
+
+        let hosts: Vec<_> = entry.bindings.iter().map(|b| b.host.as_str()).collect();
+        assert_eq!(hosts, ["api.example.com", "staging.example.com"]);
+    }
+
+    #[test]
+    fn vault_lock_is_exclusive_until_dropped() {
+        let path = std::env::temp_dir().join(format!("hush-lock-test-{}", std::process::id()));
+        let first = try_lock_at(&path).unwrap().expect("free lock");
+        assert!(try_lock_at(&path).unwrap().is_none());
+        drop(first);
+        // Wait rather than try: a child another test is spawning can hold
+        // the descriptor, and so the lock, until its exec closes it.
+        open_lock_file(&path).unwrap().lock().unwrap();
+        fs::remove_file(&path).unwrap();
+    }
 }
