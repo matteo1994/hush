@@ -4,9 +4,10 @@ mod run;
 mod tls;
 mod vault;
 
+use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
 use vault::Binding;
@@ -24,6 +25,21 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
         ),
         _ => e.into(),
     })
+}
+
+/// Asks a yes/no question on the terminal, defaulting to no. Like the
+/// passphrase prompt, it uses the terminal rather than stdin.
+fn confirm(question: &str) -> Result<bool> {
+    let mut tty = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|_| anyhow!("no terminal to confirm on"))?;
+    write!(tty, "{question} [y/N] ")?;
+    tty.flush()?;
+    let mut answer = String::new();
+    BufReader::new(&tty).read_line(&mut answer)?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
 #[derive(Parser)]
@@ -73,6 +89,10 @@ enum SecretAction {
         /// value unencrypted. Off by default.
         #[arg(long)]
         allow_http: bool,
+        /// Replace NAME, value and bindings, if it already exists, without
+        /// asking first.
+        #[arg(long)]
+        force: bool,
     },
     /// Add another host binding to an existing secret.
     Bind {
@@ -163,11 +183,32 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             header,
             format,
             allow_http,
+            force,
         } => {
             let binding = Binding::new(host, env, header, format, allow_http);
-            eprintln!("adding {name}, bound to {}", describe(&binding));
+            let replacing = if force {
+                ", replacing it if it exists"
+            } else {
+                ""
+            };
+            eprintln!("adding {name}{replacing}, bound to {}", describe(&binding));
             let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
+            if let Some(existing) = v.secrets.get(&name)
+                && !force
+            {
+                eprintln!("{name} already exists, bound to:");
+                for b in &existing.bindings {
+                    eprintln!("  {}", describe(b));
+                }
+                let replace = confirm("replace its value and bindings?").map_err(|e| {
+                    anyhow!("{name} already exists: {e}; pass --force to replace it")
+                })?;
+                if !replace {
+                    bail!("left {name} unchanged");
+                }
+            }
             let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
             v.secrets.insert(
                 name,
@@ -189,16 +230,20 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             let binding = Binding::new(host, env, header, format, allow_http);
             eprintln!("binding {name} to {}", describe(&binding));
             let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
             let Some(entry) = v.secrets.get_mut(&name) else {
                 bail!("no such secret: {name}")
             };
-            entry.bindings.push(binding);
+            entry
+                .add_binding(binding)
+                .map_err(|e| anyhow!("{name} is {e}"))?;
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Rm { name } => {
             eprintln!("removing {name}");
             let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
             if v.secrets.remove(&name).is_none() {
                 bail!("no such secret: {name}");
