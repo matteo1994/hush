@@ -19,6 +19,8 @@ cargo test <name>           # run a single test by name filter
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, the clippy line above and `cargo test --locked` on Linux and macOS, using the toolchain from `rust-toolchain.toml`.
 
+Versioning: `hush --version` prints the `Cargo.toml` version plus the commit it was built from, e.g. `hush 0.1.3 (93db286 2026-10-10)`, with `-dirty` after the hash for a tree with uncommitted changes (`build.rs` sets `HUSH_VERSION`). Don't bump the patch version in a PR: `.github/workflows/bump.yml` runs `.github/scripts/bump-version.sh` after every merge to master, which bumps it, commits `Bump version to X.Y.Z` and tags `vX.Y.Z`. For a minor or major release, change `version` in `Cargo.toml` (and `Cargo.lock`) in the PR; the workflow then only tags it.
+
 Toolchain is pinned to nightly via `rust-toolchain.toml` (rustup). Unix-only (`PermissionsExt`, `ExitStatusExt`, `libc` signals). Rust edition 2024.
 
 Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by every command that opens the vault) and `HUSH_SECRET_VALUE` (used by `secret add`). They operate on the real vault at `~/.config/hush/`, and there is no config-dir override, so point `HOME` at a throwaway directory such as `target/e2e`. `hush run` strips both variables from the child, so a nested `hush secret ...` inside it has to prompt, and fails with "no terminal" when there is none.

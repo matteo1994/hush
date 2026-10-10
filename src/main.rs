@@ -43,7 +43,11 @@ fn confirm(question: &str) -> Result<bool> {
 }
 
 #[derive(Parser)]
-#[command(name = "hush", about = "Placeholder-swap secrets for AI coding agents")]
+#[command(
+    name = "hush",
+    version = env!("HUSH_VERSION"),
+    about = "Placeholder-swap secrets for AI coding agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
