@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 
-use crate::proxy::{PlaceholderEntry, start_proxy};
+use crate::proxy::{ErrorLog, PlaceholderEntry, start_proxy};
 use crate::tls::{self, Mitm, TrustFiles};
 use crate::vault::{self, Vault};
 
@@ -137,12 +137,18 @@ pub fn run(
     let mitm = Arc::new(Mitm::new(upstream_roots)?);
     let run_dir = RunDir::create()?;
     let trust = tls::write_trust_files(&mitm, &system_roots, run_dir.path())?;
-    let port = start_proxy(Arc::new(Mutex::new(minted.table)), mitm)?;
+    let errors = Arc::new(ErrorLog::default());
+    let port = start_proxy(Arc::new(Mutex::new(minted.table)), mitm, errors.clone())?;
 
-    spawn(
+    let code = spawn(
         &cmd,
         child_env(std::env::vars(), &minted.placeholders, Some((port, &trust))),
-    )
+    );
+    // Only now: while the child ran, the terminal was its to draw on.
+    if let Some(summary) = errors.summary() {
+        eprintln!("hush: {summary}");
+    }
+    code
 }
 
 fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {

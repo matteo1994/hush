@@ -29,7 +29,56 @@ const MAX_HEAD: usize = 64 * 1024;
 /// ignores `Connection: close` can't pin a thread forever.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub fn start_proxy(table: PlaceholderTable, mitm: Arc<Mitm>) -> Result<u16> {
+/// Most distinct messages an `ErrorLog` keeps; later new ones are only counted.
+const MAX_DISTINCT_ERRORS: usize = 8;
+
+/// Connection errors, collected instead of printed: the proxy shares the
+/// child's terminal, and a line written under a full-screen agent corrupts its
+/// display. The run reports them once the child has exited.
+#[derive(Default)]
+pub struct ErrorLog {
+    inner: Mutex<ErrorCounts>,
+}
+
+#[derive(Default)]
+struct ErrorCounts {
+    /// Distinct messages in first-seen order, with how often each occurred.
+    seen: Vec<(String, usize)>,
+    /// Errors dropped because `seen` was full.
+    other: usize,
+}
+
+impl ErrorLog {
+    fn record(&self, message: String) {
+        let mut counts = self.inner.lock().unwrap();
+        if let Some((_, n)) = counts.seen.iter_mut().find(|(m, _)| *m == message) {
+            *n += 1;
+        } else if counts.seen.len() < MAX_DISTINCT_ERRORS {
+            counts.seen.push((message, 1));
+        } else {
+            counts.other += 1;
+        }
+    }
+
+    /// One line per distinct error, or `None` if there were none.
+    pub fn summary(&self) -> Option<String> {
+        let counts = self.inner.lock().unwrap();
+        let total = counts.seen.iter().map(|(_, n)| n).sum::<usize>() + counts.other;
+        if total == 0 {
+            return None;
+        }
+        let mut out = format!("{total} proxy connection error(s) during the run:");
+        for (message, n) in &counts.seen {
+            out.push_str(&format!("\n  {n}× {message}"));
+        }
+        if counts.other > 0 {
+            out.push_str(&format!("\n  {}× other errors", counts.other));
+        }
+        Some(out)
+    }
+}
+
+pub fn start_proxy(table: PlaceholderTable, mitm: Arc<Mitm>, errors: Arc<ErrorLog>) -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
@@ -38,9 +87,10 @@ pub fn start_proxy(table: PlaceholderTable, mitm: Arc<Mitm>) -> Result<u16> {
             let Ok(client) = stream else { continue };
             let table = table.clone();
             let mitm = mitm.clone();
+            let errors = errors.clone();
             thread::spawn(move || {
                 if let Err(e) = handle_connection(client, &table, &mitm) {
-                    eprintln!("hush-agent: proxy connection error: {e:#}");
+                    errors.record(format!("{e:#}"));
                 }
             });
         }
@@ -627,6 +677,24 @@ mod tests {
     }
 
     #[test]
+    fn error_log_counts_repeats_and_caps_distinct_messages() {
+        let log = ErrorLog::default();
+        assert_eq!(log.summary(), None);
+
+        for _ in 0..3 {
+            log.record("connecting to a:443: no route".to_string());
+        }
+        for i in 0..MAX_DISTINCT_ERRORS + 1 {
+            log.record(format!("error {i}"));
+        }
+        let summary = log.summary().unwrap();
+        assert!(summary.starts_with(&format!("{} proxy", MAX_DISTINCT_ERRORS + 4)));
+        assert!(summary.contains("\n  3× connecting to a:443: no route"));
+        assert!(summary.contains("\n  1× error 0"));
+        assert!(summary.ends_with("\n  2× other errors"), "{summary}");
+    }
+
+    #[test]
     fn copies_chunked_body_and_stops_at_end() {
         let wire = b"5;ext=1\r\nhello\r\n0\r\nX-Trailer: t\r\n\r\nNEXT REQUEST";
         let mut src = BufReader::new(&wire[..]);
@@ -756,7 +824,8 @@ mod tests {
             roots.add((*cert).clone()).unwrap();
         }
         let mitm = Arc::new(Mitm::new(roots).unwrap());
-        (start_proxy(table, mitm.clone()).unwrap(), mitm)
+        let port = start_proxy(table, mitm.clone(), Arc::default()).unwrap();
+        (port, mitm)
     }
 
     /// Sends `CONNECT authority` and returns the tunnel plus the proxy's status line.
