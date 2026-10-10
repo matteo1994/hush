@@ -1,0 +1,29 @@
+name: Bump version
+
+# Every merge to master gets its own patch version and a `v<version>` tag.
+# The push below uses GITHUB_TOKEN, which doesn't trigger workflows, so the
+# bump commit can't start another bump.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+# One at a time, and never cancelled: each run works on the tip of master.
+concurrency:
+  group: bump-version
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          # Full history, so the existing tags are there to compare against.
+          fetch-depth: 0
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          .github/scripts/bump-version.sh
