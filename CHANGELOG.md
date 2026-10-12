@@ -1,7 +1,8 @@
 # Changelog
 
-Every merge to master is a release. CI adds its entry here, from the merged
-commits' subjects (see `.github/scripts/bump-version.sh`).
+Every merge to master that changes the program is a release. CI adds its entry
+here, from the merged commits' subjects (see
+`.github/scripts/bump-version.sh`).
 
 ## 0.1.1 (2026-10-12)
 
