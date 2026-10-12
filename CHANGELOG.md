@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.2 (2026-10-12)
+
+- Release only after the tests pass and only when the program changed; add the Apache-2.0 license. (#12)
+
 ## 0.1.1 (2026-10-12)
 
 - Keep a changelog, written by CI with each release. (#11)
