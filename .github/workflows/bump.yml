@@ -1,8 +1,8 @@
 name: Bump version
 
-# Every merge to master gets its own patch version and a `v<version>` tag.
-# The push below uses GITHUB_TOKEN, which doesn't trigger workflows, so the
-# bump commit can't start another bump.
+# Every merge to master gets its own patch version, a CHANGELOG.md entry and
+# a `v<version>` tag. The push below uses GITHUB_TOKEN, which doesn't trigger
+# workflows, so the release commit can't start another release.
 on:
   push:
     branches: [master]

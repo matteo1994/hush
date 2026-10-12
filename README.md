@@ -114,6 +114,6 @@ cargo install --path .      # puts hush in ~/.cargo/bin
 hush --version              # hush 0.1.3 (93db286 2026-10-10)
 ```
 
-`--version` shows the version and the commit the binary was built from, with `-dirty` after the hash if the tree had uncommitted changes. Every merge to master gets its own patch version and a `v<version>` tag, bumped by CI.
+`--version` shows the version and the commit the binary was built from, with `-dirty` after the hash if the tree had uncommitted changes. Every merge to master gets its own patch version, a `v<version>` tag and an entry in [CHANGELOG.md](CHANGELOG.md), all added by CI.
 
 No system dependencies beyond a Rust toolchain; all cryptography (`age`) and HTTP parsing are pure-Rust crates, so there's no equivalent of the "no prebuilt wheel for this platform" problem that motivated keeping this simple in the first place.
