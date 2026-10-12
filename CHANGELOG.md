@@ -3,6 +3,10 @@
 Every merge to master is a release. CI adds its entry here, from the merged
 commits' subjects (see `.github/scripts/bump-version.sh`).
 
+## 0.1.1 (2026-10-12)
+
+- Keep a changelog, written by CI with each release. (#11)
+
 ## 0.1.0 (2026-10-10)
 
 - Initial commit: hush, a placeholder-swap credential proxy for AI coding agents.
