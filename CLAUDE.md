@@ -19,7 +19,7 @@ cargo test <name>           # run a single test by name filter
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, the clippy line above and `cargo test --locked` on Linux and macOS, using the toolchain from `rust-toolchain.toml`.
 
-Versioning: `hush --version` prints the `Cargo.toml` version plus the commit it was built from, e.g. `hush 0.1.3 (93db286 2026-10-10)`, with `-dirty` after the hash for a tree with uncommitted changes (`build.rs` sets `HUSH_VERSION`). Don't bump the patch version in a PR: `.github/workflows/bump.yml` runs `.github/scripts/bump-version.sh` after every merge to master, which bumps it, commits `Bump version to X.Y.Z` and tags `vX.Y.Z`. For a minor or major release, change `version` in `Cargo.toml` (and `Cargo.lock`) in the PR; the workflow then only tags it.
+Versioning: `hush --version` prints the `Cargo.toml` version plus the commit it was built from, e.g. `hush 0.1.3 (93db286 2026-10-10)`, with `-dirty` after the hash for a tree with uncommitted changes (`build.rs` sets `HUSH_VERSION`). Don't bump the patch version or edit `CHANGELOG.md` in a PR: `.github/workflows/bump.yml` runs `.github/scripts/bump-version.sh` after every merge to master, which bumps the version, adds a `CHANGELOG.md` section listing the merged commits' subjects, commits both as `Release X.Y.Z` and tags `vX.Y.Z`. So the squash-merge subject is the changelog line: write it as a sentence a user would understand. For a minor or major release, change `version` in `Cargo.toml` (and `Cargo.lock`) in the PR; the workflow then releases that version instead of bumping.
 
 Toolchain is pinned to nightly via `rust-toolchain.toml` (rustup). Unix-only (`PermissionsExt`, `ExitStatusExt`, `libc` signals). Rust edition 2024.
 
