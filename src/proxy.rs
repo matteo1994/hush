@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -22,12 +23,16 @@ pub struct PlaceholderEntry {
 
 pub type PlaceholderTable = Arc<Mutex<HashMap<String, PlaceholderEntry>>>;
 
-/// Upper bound on a request head, so a client can't make the agent buffer forever.
+/// Upper bound on a message head, so neither side can make the proxy buffer forever.
 const MAX_HEAD: usize = 64 * 1024;
 
-/// Read timeout on forwarded (non-tunnel) upstream connections, so a server that
-/// ignores `Connection: close` can't pin a thread forever.
+/// Read timeout on forwarded (non-tunnel) upstream connections, so a server
+/// that goes silent mid-response can't pin a thread forever. Waiting between
+/// requests on a kept-alive connection isn't a read and isn't limited by it.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(300);
+
+type ClientTls = StreamOwned<ServerConnection, TcpStream>;
+type UpstreamTls = StreamOwned<ClientConnection, TcpStream>;
 
 /// Most distinct messages an `ErrorLog` keeps; later new ones are only counted.
 const MAX_DISTINCT_ERRORS: usize = 8;
@@ -102,42 +107,59 @@ pub fn start_proxy(table: PlaceholderTable, mitm: Arc<Mitm>, errors: Arc<ErrorLo
 struct Head {
     method: String,
     path: String,
+    /// The minor version: 1 for HTTP/1.1.
+    version: u8,
     headers: Vec<(String, String)>,
 }
 
-fn handle_connection(mut client: TcpStream, table: &PlaceholderTable, mitm: &Mitm) -> Result<()> {
-    let (head, leftover) = read_head(&mut client)?;
+struct ResponseHead {
+    version: u8,
+    status: u16,
+    headers: Vec<(String, String)>,
+}
+
+fn handle_connection(client: TcpStream, table: &PlaceholderTable, mitm: &Mitm) -> Result<()> {
+    let mut client = BufReader::new(client);
+    let Some(head) = read_head(&mut client)? else {
+        return Ok(());
+    };
     let req = parse_head(&head)?;
 
     if req.method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = split_host_port(&req.path, 443);
-        return handle_connect(client, leftover, &host, port, table, mitm);
+        let leftover = client.buffer().to_vec();
+        return handle_connect(client.into_inner(), leftover, &host, port, table, mitm);
     }
 
     let (host, port, path) = resolve_target(&req.path, header_value(&req.headers, "host"))?;
-    let mut upstream = TcpStream::connect((host.as_str(), port))?;
+    let upstream = TcpStream::connect((host.as_str(), port))?;
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
     // Judged by the address actually connected to, not the name, so a bound
     // name that resolves off-machine doesn't count as local.
     let leaves_machine = !upstream.peer_addr()?.ip().to_canonical().is_loopback();
+    // One request per connection here: the next could name a different host.
     forward(
         &mut client,
-        &leftover,
         req,
         &path,
         &host,
         leaves_machine,
         table,
-        &mut upstream,
-    )
+        &mut BufReader::new(upstream),
+        false,
+    )?;
+    Ok(())
 }
 
 /// HTTPS via `CONNECT`. Hosts that some minted placeholder is bound to get
 /// intercepted: TLS is terminated with a session-CA leaf for that host, the
-/// request is forwarded with placeholders swapped, over a fresh, verified TLS
-/// connection to the real host. Every other host gets a blind byte tunnel —
-/// hush never decrypts traffic it has no secret for, and any placeholder in it
-/// goes out verbatim.
+/// requests are forwarded with placeholders swapped, over a verified TLS
+/// connection to the real host. That upstream connection belongs to this
+/// client connection alone and carries its requests one after another for as
+/// long as both ends keep theirs open; it is never shared, so nothing a client
+/// does to the framing can reach another client's responses. Every other host
+/// gets a blind byte tunnel — hush never decrypts traffic it has no secret
+/// for, and any placeholder in it goes out verbatim.
 fn handle_connect(
     mut client: TcpStream,
     leftover: Vec<u8>,
@@ -165,29 +187,91 @@ fn handle_connect(
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
     let server_name =
         ServerName::try_from(host.to_string()).with_context(|| format!("invalid host {host}"))?;
-    let mut upstream = StreamOwned::new(
+    let mut upstream = BufReader::new(StreamOwned::new(
         ClientConnection::new(mitm.upstream_config(), server_name)?,
         upstream,
-    );
-    let mut client = StreamOwned::new(ServerConnection::new(mitm.server_config(host)?)?, client);
+    ));
+    let mut client = BufReader::new(StreamOwned::new(
+        ServerConnection::new(mitm.server_config(host)?)?,
+        client,
+    ));
 
-    let (head, leftover) = read_head(&mut client)?;
-    let req = parse_head(&head)?;
-    let path = req.path.clone();
-    forward(
-        &mut client,
-        &leftover,
-        req,
-        &path,
-        host,
-        false,
-        table,
-        &mut upstream,
-    )?;
+    while let Some(head) = read_head(&mut client)? {
+        let req = parse_head(&head)?;
+        let path = req.path.clone();
+        let reusable = forward(
+            &mut client,
+            req,
+            &path,
+            host,
+            false,
+            table,
+            &mut upstream,
+            true,
+        )?;
+        if !reusable || !wait_for_request(&mut client, &mut upstream) {
+            break;
+        }
+    }
 
-    client.conn.send_close_notify();
-    let _ = client.flush();
+    client.get_mut().conn.send_close_notify();
+    let _ = client.get_mut().flush();
+    upstream.get_mut().conn.send_close_notify();
+    let _ = upstream.get_mut().flush();
     Ok(())
+}
+
+/// Between requests on a kept-alive pair: blocks until the client has sent
+/// something (`true`), or the upstream connection is no longer usable for
+/// another request (`false`). Closing the client side as soon as the server
+/// drops its idle connection is what the client would see without a proxy, and
+/// what lets it retry on a fresh connection instead of sending into a dead one.
+fn wait_for_request(
+    client: &mut BufReader<ClientTls>,
+    upstream: &mut BufReader<UpstreamTls>,
+) -> bool {
+    loop {
+        // Already read off the socket, so no poll would ever report it.
+        let decrypted = |tls: &mut ClientTls| {
+            tls.conn
+                .process_new_packets()
+                .is_ok_and(|state| state.plaintext_bytes_to_read() > 0)
+        };
+        if !client.buffer().is_empty() || decrypted(client.get_mut()) {
+            return true;
+        }
+
+        let pollfd = |fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let mut fds = [
+            pollfd(upstream.get_ref().sock.as_raw_fd()),
+            pollfd(client.get_ref().sock.as_raw_fd()),
+        ];
+        if unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) } < 0 {
+            if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return false;
+        }
+        if fds[0].revents != 0 {
+            // Either the server is done with this connection, or it is TLS
+            // housekeeping (a new session ticket, a key update), which leaves
+            // the connection as usable as before.
+            let tls = upstream.get_mut();
+            let alive = matches!(tls.conn.read_tls(&mut tls.sock), Ok(n) if n > 0)
+                && tls.conn.process_new_packets().is_ok_and(|state| {
+                    !state.peer_has_closed() && state.plaintext_bytes_to_read() == 0
+                });
+            if !alive {
+                return false;
+            }
+        } else if fds[1].revents != 0 {
+            return true;
+        }
+    }
 }
 
 fn tunnel(mut client: TcpStream, leftover: &[u8], mut upstream: TcpStream) -> Result<()> {
@@ -204,30 +288,35 @@ fn tunnel(mut client: TcpStream, leftover: &[u8], mut upstream: TcpStream) -> Re
     Ok(())
 }
 
-/// Forwards one request and relays its response. The request is sent with
-/// `Connection: close`, so the response ends at upstream EOF and the client
-/// opens a fresh connection (and fresh substitution) for its next request.
-/// `cleartext` means the request crosses the network unencrypted.
+/// Forwards one request and relays its response. Returns whether both
+/// connections are left at a message boundary and willing to carry another
+/// request, which is only ever the case when the caller asked with `reuse`;
+/// without it the request goes out with `Connection: close`. Each request gets
+/// its own substitution. `cleartext` means the request crosses the network
+/// unencrypted.
 #[allow(clippy::too_many_arguments)]
 fn forward<C: Read + Write, U: Read + Write>(
-    client: &mut C,
-    leftover: &[u8],
+    client: &mut BufReader<C>,
     req: Head,
     path: &str,
     target_host: &str,
     cleartext: bool,
     table: &PlaceholderTable,
-    upstream: &mut U,
-) -> Result<()> {
+    upstream: &mut BufReader<U>,
+    reuse: bool,
+) -> Result<bool> {
     let body = body_framing(&req.headers)?;
     let expects_continue = req.headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("expect") && v.trim().eq_ignore_ascii_case("100-continue")
     });
+    let keep_alive = reuse && req.version == 1 && !connection_has(&req.headers, "close");
 
     let mut headers = req.headers;
     substitute_placeholders(&mut headers, target_host, cleartext, table);
     headers.retain(|(k, _)| !HOP_BY_HOP.iter().any(|h| k.eq_ignore_ascii_case(h)));
-    headers.push(("Connection".to_string(), "close".to_string()));
+    if !keep_alive {
+        headers.push(("Connection".to_string(), "close".to_string()));
+    }
     let scrubber = if is_bound_host(table, target_host) {
         // A missing Accept-Encoding means any coding is acceptable, so ask for
         // `identity` explicitly: a compressed response can't be scanned.
@@ -243,21 +332,55 @@ fn forward<C: Read + Write, U: Read + Write>(
         out.push_str(&format!("{k}: {v}\r\n"));
     }
     out.push_str("\r\n");
-    upstream.write_all(out.as_bytes())?;
+    upstream.get_mut().write_all(out.as_bytes())?;
 
     // `Expect` was stripped upstream, so answer it here or the client stalls
     // waiting before it sends the body.
     if expects_continue {
-        client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
-        client.flush()?;
+        client
+            .get_mut()
+            .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+        client.get_mut().flush()?;
     }
-    {
-        let mut src = BufReader::new(leftover.chain(&mut *client));
-        copy_body(&mut src, upstream, body)?;
-    }
-    upstream.flush()?;
+    copy_body(client, upstream.get_mut(), body)?;
+    upstream.get_mut().flush()?;
 
-    relay_until_eof(upstream, client, scrubber)
+    let mut out = Scrubbed {
+        scrubber,
+        out: client.get_mut(),
+    };
+    let reusable = relay_response(upstream, &mut out, &req.method)?;
+    // Bytes past the response's end mean the two sides disagree on framing.
+    Ok(keep_alive && reusable && upstream.buffer().is_empty())
+}
+
+/// Relays one response, with any interim (1xx) ones before it, and reports
+/// whether the upstream connection can carry another request afterwards.
+fn relay_response<U: BufRead, W: Write>(
+    upstream: &mut U,
+    out: &mut Scrubbed<'_, W>,
+    method: &str,
+) -> Result<bool> {
+    loop {
+        let head = read_head(upstream)?.context("upstream closed before responding")?;
+        out.write_all(&head)?;
+        let Some(resp) = parse_response_head(&head) else {
+            // Nothing to frame it by: pass it on as it comes, to the end.
+            copy_body(upstream, out, Body::UntilClose)?;
+            out.finish()?;
+            return Ok(false);
+        };
+        if (100..200).contains(&resp.status) && resp.status != 101 {
+            out.finish()?;
+            continue;
+        }
+        let body = response_framing(method, &resp);
+        copy_body(upstream, out, body)?;
+        out.finish()?;
+        return Ok(body != Body::UntilClose
+            && resp.version == 1
+            && !connection_has(&resp.headers, "close"));
+    }
 }
 
 /// Headers that only make sense for the client↔proxy hop.
@@ -269,11 +392,13 @@ const HOP_BY_HOP: &[&str] = &[
     "expect",
 ];
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Body {
     None,
     Length(u64),
     Chunked,
+    /// Ends when the sender closes the connection. Responses only.
+    UntilClose,
 }
 
 fn body_framing(headers: &[(String, String)]) -> Result<Body> {
@@ -290,11 +415,37 @@ fn body_framing(headers: &[(String, String)]) -> Result<Body> {
     }
 }
 
-/// Copies exactly one request body, re-emitting chunked framing verbatim.
+/// How a response's body ends, given the method of the request it answers.
+fn response_framing(method: &str, resp: &ResponseHead) -> Body {
+    if method.eq_ignore_ascii_case("HEAD") || matches!(resp.status, 100 | 102..=199 | 204 | 304) {
+        return Body::None;
+    }
+    // A 101 hands the connection to another protocol, which isn't relayed in
+    // both directions here; what the server sends is passed on until it closes.
+    if resp.status == 101 {
+        return Body::UntilClose;
+    }
+    match body_framing(&resp.headers) {
+        Ok(Body::None) | Err(_) => Body::UntilClose,
+        Ok(body) => body,
+    }
+}
+
+/// Whether a `Connection` header lists `token`.
+fn connection_has(headers: &[(String, String)], token: &str) -> bool {
+    headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
+        .flat_map(|(_, v)| v.split(','))
+        .any(|t| t.trim().eq_ignore_ascii_case(token))
+}
+
+/// Copies exactly one message body, re-emitting chunked framing verbatim.
 fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Result<()> {
     match body {
         Body::None => Ok(()),
         Body::Length(n) => copy_exact(src, dst, n),
+        Body::UntilClose => copy_until_close(src, dst),
         Body::Chunked => loop {
             let line = read_line(src)?;
             dst.write_all(line.as_bytes())?;
@@ -318,7 +469,7 @@ fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Resu
 
 fn copy_exact<R: Read, W: Write>(src: &mut R, dst: &mut W, n: u64) -> Result<()> {
     if io::copy(&mut src.take(n), dst)? < n {
-        bail!("client closed the connection mid-body");
+        bail!("connection closed mid-body");
     }
     Ok(())
 }
@@ -326,32 +477,25 @@ fn copy_exact<R: Read, W: Write>(src: &mut R, dst: &mut W, n: u64) -> Result<()>
 fn read_line<R: BufRead>(src: &mut R) -> Result<String> {
     let mut line = String::new();
     if src.read_line(&mut line)? == 0 {
-        bail!("client closed the connection mid-body");
+        bail!("connection closed mid-body");
     }
     Ok(line)
 }
 
-fn relay_until_eof<U: Read, C: Write>(
-    upstream: &mut U,
-    client: &mut C,
-    mut scrubber: Scrubber,
-) -> Result<()> {
+fn copy_until_close<R: Read, W: Write>(src: &mut R, dst: &mut W) -> Result<()> {
     let mut buf = [0u8; 16 * 1024];
     loop {
-        let n = match upstream.read(&mut buf) {
-            Ok(0) => break,
+        let n = match src.read(&mut buf) {
+            Ok(0) => return Ok(()),
             Ok(n) => n,
             // Plenty of servers close without a TLS close_notify; the response
             // is still complete from HTTP's point of view.
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.into()),
         };
-        client.write_all(&scrubber.feed(&buf[..n]))?;
+        dst.write_all(&buf[..n])?;
     }
-    client.write_all(&scrubber.finish())?;
-    client.flush()?;
-    Ok(())
 }
 
 /// Replaces every real value in a byte stream with a marker of the same
@@ -421,24 +565,62 @@ impl Scrubber {
     }
 }
 
-/// Reads bytes until the header terminator is found, returning
-/// (`head_bytes`, `leftover_body_bytes_already_read`).
-fn read_head<R: Read>(client: &mut R) -> Result<(Vec<u8>, Vec<u8>)> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
+/// A response on its way to the client, through a `Scrubber`.
+struct Scrubbed<'a, W: Write> {
+    scrubber: Scrubber,
+    out: &'a mut W,
+}
+
+impl<W: Write> Scrubbed<'_, W> {
+    /// Releases what the scrubber held back, at the end of a message.
+    fn finish(&mut self) -> io::Result<()> {
+        self.out.write_all(&self.scrubber.finish())?;
+        self.out.flush()
+    }
+}
+
+impl<W: Write> Write for Scrubbed<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.out.write_all(&self.scrubber.feed(buf))?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
+/// Reads one message head, through its blank line, and leaves whatever
+/// follows in `src`. `None` if the connection ended before the first byte.
+fn read_head<R: BufRead>(src: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut head = Vec::new();
     loop {
-        if let Some(pos) = find_double_crlf(&buf) {
-            let leftover = buf.split_off(pos + 4);
-            return Ok((buf, leftover));
-        }
-        if buf.len() > MAX_HEAD {
-            bail!("request head larger than {MAX_HEAD} bytes");
-        }
-        let n = client.read(&mut chunk)?;
-        if n == 0 {
+        let buf = match src.fill_buf() {
+            Ok(buf) => buf,
+            // A TLS peer that closed without a close_notify.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => &[],
+            Err(e) => return Err(e.into()),
+        };
+        if buf.is_empty() {
+            if head.is_empty() {
+                return Ok(None);
+            }
             bail!("connection closed before headers were complete");
         }
-        buf.extend_from_slice(&chunk[..n]);
+        let taken = buf.len();
+        // The terminator may straddle what was read before.
+        let from = head.len().saturating_sub(3);
+        head.extend_from_slice(buf);
+        if let Some(pos) = find_double_crlf(&head[from..]) {
+            let end = from + pos + 4;
+            src.consume(taken - (head.len() - end));
+            head.truncate(end);
+            return Ok(Some(head));
+        }
+        src.consume(taken);
+        if head.len() > MAX_HEAD {
+            bail!("message head larger than {MAX_HEAD} bytes");
+        }
     }
 }
 
@@ -451,17 +633,35 @@ fn parse_head(head: &[u8]) -> Result<Head> {
     Ok(Head {
         method: parsed.method.unwrap_or("GET").to_string(),
         path: parsed.path.unwrap_or("/").to_string(),
-        headers: parsed
-            .headers
-            .iter()
-            .map(|h| {
-                (
-                    h.name.to_string(),
-                    String::from_utf8_lossy(h.value).to_string(),
-                )
-            })
-            .collect(),
+        version: parsed.version.unwrap_or(1),
+        headers: owned_headers(parsed.headers),
     })
+}
+
+/// `None` for anything that isn't a complete, well-formed response head.
+fn parse_response_head(head: &[u8]) -> Option<ResponseHead> {
+    let mut headers = [httparse::EMPTY_HEADER; 128];
+    let mut parsed = httparse::Response::new(&mut headers);
+    if !parsed.parse(head).ok()?.is_complete() {
+        return None;
+    }
+    Some(ResponseHead {
+        version: parsed.version?,
+        status: parsed.code?,
+        headers: owned_headers(parsed.headers),
+    })
+}
+
+fn owned_headers(headers: &[httparse::Header]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|h| {
+            (
+                h.name.to_string(),
+                String::from_utf8_lossy(h.value).to_string(),
+            )
+        })
+        .collect()
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -747,22 +947,26 @@ mod tests {
         received: std::sync::mpsc::Receiver<Option<String>>,
     }
 
-    fn spawn_upstream(tls: bool) -> Upstream {
+    /// A self-signed TLS identity for `localhost`.
+    fn localhost_tls() -> (Arc<ServerConfig>, CertificateDer<'static>) {
         let key = rcgen::KeyPair::generate().unwrap();
         let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
             .unwrap()
             .self_signed(&key)
             .unwrap();
         let cert_der = cert.der().clone();
-        let cfg = Arc::new(
-            ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(
-                    vec![cert_der.clone()],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
-                )
-                .unwrap(),
-        );
+        let cfg = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert_der.clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap();
+        (Arc::new(cfg), cert_der)
+    }
+
+    fn spawn_upstream(tls: bool) -> Upstream {
+        let (cfg, cert_der) = localhost_tls();
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -789,13 +993,11 @@ mod tests {
     }
 
     fn echo_one<S: Read + Write>(s: &mut S) -> Result<String> {
-        let (head, leftover) = read_head(s)?;
+        let mut src = BufReader::new(&mut *s);
+        let head = read_head(&mut src)?.context("no request")?;
         let req = parse_head(&head)?;
         let mut body = Vec::new();
-        {
-            let mut src = BufReader::new(leftover.as_slice().chain(&mut *s));
-            copy_body(&mut src, &mut body, body_framing(&req.headers)?)?;
-        }
+        copy_body(&mut src, &mut body, body_framing(&req.headers)?)?;
         let seen = format!(
             "{}{}",
             String::from_utf8_lossy(&head),
@@ -812,6 +1014,86 @@ mod tests {
 
     fn received(up: &Upstream) -> Option<String> {
         up.received.recv_timeout(Duration::from_secs(5)).unwrap()
+    }
+
+    /// A TLS upstream for `localhost` that leaves its connections open. Every
+    /// request is echoed back and reported through `seen`, with the index of
+    /// the connection it arrived on. A path containing `chunked` gets a
+    /// chunked response; one containing `then-close` is the last on its
+    /// connection, without the response saying so.
+    struct KeepAliveUpstream {
+        port: u16,
+        cert: CertificateDer<'static>,
+        seen: std::sync::mpsc::Receiver<(usize, String)>,
+    }
+
+    fn spawn_keep_alive_upstream() -> KeepAliveUpstream {
+        let (cfg, cert) = localhost_tls();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, seen) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for (index, tcp) in listener.incoming().enumerate() {
+                let (cfg, tx) = (cfg.clone(), tx.clone());
+                thread::spawn(move || {
+                    let tls = StreamOwned::new(ServerConnection::new(cfg).unwrap(), tcp.unwrap());
+                    let mut s = BufReader::new(tls);
+                    while let Ok(Some(seen)) = echo_and_stay_open(&mut s) {
+                        let last = seen.contains("then-close");
+                        let _ = tx.send((index, seen));
+                        if last {
+                            break;
+                        }
+                    }
+                    s.get_mut().conn.send_close_notify();
+                    let _ = s.get_mut().flush();
+                });
+            }
+        });
+        KeepAliveUpstream { port, cert, seen }
+    }
+
+    fn echo_and_stay_open<S: Read + Write>(s: &mut BufReader<S>) -> Result<Option<String>> {
+        let Some(head) = read_head(s)? else {
+            return Ok(None);
+        };
+        let req = parse_head(&head)?;
+        let mut body = Vec::new();
+        copy_body(s, &mut body, body_framing(&req.headers)?)?;
+        let seen = format!(
+            "{}{}",
+            String::from_utf8_lossy(&head),
+            String::from_utf8_lossy(&body)
+        );
+        let out = s.get_mut();
+        if req.method == "HEAD" {
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                seen.len()
+            )?;
+        } else if req.path.contains("chunked") {
+            let (a, b) = seen.split_at(seen.len() / 2);
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+                 {:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+                a.len(),
+                b.len()
+            )?;
+        } else {
+            write!(
+                out,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{seen}",
+                seen.len()
+            )?;
+        }
+        out.flush()?;
+        Ok(Some(seen))
+    }
+
+    fn seen(up: &KeepAliveUpstream) -> (usize, String) {
+        up.seen.recv_timeout(Duration::from_secs(5)).unwrap()
     }
 
     /// Starts a proxy whose upstream TLS trusts only `upstream_roots`.
@@ -836,7 +1118,9 @@ mod tests {
             "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n"
         )
         .unwrap();
-        let (head, _) = read_head(&mut tcp).unwrap();
+        // So that a response that never comes fails a test instead of hanging it.
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let head = read_head(&mut BufReader::new(&tcp)).unwrap().unwrap();
         let status = String::from_utf8_lossy(&head)
             .lines()
             .next()
@@ -863,8 +1147,28 @@ mod tests {
     fn roundtrip<S: Read + Write>(s: &mut S, request: &str) -> String {
         s.write_all(request.as_bytes()).unwrap();
         let mut resp = Vec::new();
-        let _ = relay_until_eof(s, &mut resp, Scrubber::new(Vec::new()));
+        let _ = copy_until_close(s, &mut resp);
         String::from_utf8_lossy(&resp).into_owned()
+    }
+
+    /// Sends `request` and reads exactly one response, leaving the connection open.
+    fn exchange<S: Read + Write>(s: &mut BufReader<S>, method: &str, request: &str) -> String {
+        s.get_mut().write_all(request.as_bytes()).unwrap();
+        let head = read_head(s).unwrap().expect("no response");
+        let resp = parse_response_head(&head).unwrap();
+        let mut body = Vec::new();
+        copy_body(s, &mut body, response_framing(method, &resp)).unwrap();
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&head),
+            String::from_utf8_lossy(&body)
+        )
+    }
+
+    fn get(path: &str) -> String {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {PLACEHOLDER}\r\n\r\n"
+        )
     }
 
     fn chunked_post() -> String {
@@ -972,26 +1276,127 @@ mod tests {
              Expect: 100-continue\r\nContent-Length: 5\r\n\r\n"
         )
         .unwrap();
-        let (interim, _) = read_head(&mut tls).unwrap();
+        let mut tls = BufReader::new(tls);
+        let interim = read_head(&mut tls).unwrap().unwrap();
         assert!(interim.starts_with(b"HTTP/1.1 100 Continue"));
-        let resp = roundtrip(&mut tls, "hello");
+        let resp = roundtrip(tls.get_mut(), "hello");
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
 
         let seen = received(&up).unwrap().to_ascii_lowercase();
         assert!(seen.contains("authorization: bearer real\r\n"), "{seen}");
-        assert!(seen.contains("connection: close\r\n"), "{seen}");
         assert!(seen.ends_with("\r\n\r\nhello"), "{seen}");
-        for stripped in [
-            "proxy-authorization",
-            "keep-alive",
-            "expect",
-            "connection: keep-alive",
-        ] {
+        for stripped in ["proxy-authorization", "keep-alive", "expect", "connection"] {
             assert!(
                 !seen.contains(stripped),
                 "{stripped} leaked upstream: {seen}"
             );
         }
+    }
+
+    #[test]
+    fn intercepted_connection_carries_several_requests_over_one_upstream_connection() {
+        let up = spawn_keep_alive_upstream();
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let mut tls = BufReader::new(tls_client(tcp, mitm.ca_der()));
+
+        let requests = [
+            ("GET", get("/length")),
+            ("HEAD", get("/head").replacen("GET", "HEAD", 1)),
+            ("POST", chunked_post().replacen("/v1", "/chunked", 1)),
+            ("GET", get("/last")),
+        ];
+        for (method, request) in &requests {
+            let resp = exchange(&mut tls, method, request);
+            assert!(resp.starts_with("HTTP/1.1 200"), "{method}: {resp}");
+
+            let (connection, seen) = seen(&up);
+            assert_eq!(connection, 0, "{method} went out on a new connection");
+            // Swapped on every request, not only the first.
+            assert!(seen.contains("Authorization: Bearer REAL\r\n"), "{seen}");
+            assert!(!seen.to_ascii_lowercase().contains("connection:"), "{seen}");
+            match *method {
+                "HEAD" => assert!(resp.ends_with("\r\n\r\n"), "{resp}"),
+                // The echo quotes the real value; the scrubber still applies.
+                "GET" => assert!(resp.contains("Bearer HUSH") && !resp.contains("REAL")),
+                _ => assert!(resp.ends_with("0\r\n\r\n"), "{resp}"),
+            }
+        }
+    }
+
+    #[test]
+    fn client_asking_to_close_ends_both_connections() {
+        let up = spawn_keep_alive_upstream();
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+
+        // The upstream would keep going, so reading to the end only returns
+        // because the proxy closes.
+        let request = get("/once").replacen("\r\n\r\n", "\r\nConnection: close\r\n\r\n", 1);
+        let resp = roundtrip(&mut tls_client(tcp, mitm.ca_der()), &request);
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(seen(&up).1.contains("Connection: close\r\n"));
+    }
+
+    #[test]
+    fn upstream_dropping_an_idle_connection_closes_the_client_side() {
+        let up = spawn_keep_alive_upstream();
+        let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let mut tls = BufReader::new(tls_client(tcp, mitm.ca_der()));
+
+        let resp = exchange(&mut tls, "GET", &get("/then-close"));
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        // Nothing in the response announced it; the client learns from the
+        // connection itself, as it would without a proxy.
+        let mut rest = Vec::new();
+        copy_until_close(&mut tls, &mut rest).unwrap();
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn read_head_leaves_what_follows_in_the_reader() {
+        let mut src = BufReader::with_capacity(5, &b"GET / HTTP/1.1\r\nHost: a\r\n\r\nbody"[..]);
+        let head = read_head(&mut src).unwrap().unwrap();
+        assert!(head.ends_with(b"Host: a\r\n\r\n"));
+        let mut rest = String::new();
+        src.read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, "body");
+
+        assert!(read_head(&mut &b""[..]).unwrap().is_none());
+        assert!(read_head(&mut &b"GET / HTTP/1.1\r\n"[..]).is_err());
+    }
+
+    #[test]
+    fn response_framing_follows_status_method_and_headers() {
+        let framing = |method, head: &str| {
+            let head = format!("HTTP/1.1 {head}\r\n\r\n");
+            response_framing(method, &parse_response_head(head.as_bytes()).unwrap())
+        };
+        assert_eq!(
+            framing("GET", "200 OK\r\nContent-Length: 7"),
+            Body::Length(7)
+        );
+        assert_eq!(framing("HEAD", "200 OK\r\nContent-Length: 7"), Body::None);
+        assert_eq!(
+            framing("GET", "304 Not Modified\r\nContent-Length: 7"),
+            Body::None
+        );
+        assert_eq!(framing("GET", "204 No Content"), Body::None);
+        assert_eq!(
+            framing(
+                "GET",
+                "200 OK\r\nContent-Length: 7\r\nTransfer-Encoding: chunked"
+            ),
+            Body::Chunked
+        );
+        assert_eq!(framing("GET", "200 OK"), Body::UntilClose);
+        assert_eq!(
+            framing("GET", "200 OK\r\nContent-Length: x"),
+            Body::UntilClose
+        );
+        assert_eq!(framing("GET", "101 Switching Protocols"), Body::UntilClose);
+        assert!(parse_response_head(b"not http\r\n\r\n").is_none());
     }
 
     #[test]

@@ -87,7 +87,7 @@ hush run -- claude                          # a coding agent and everything it s
 
 ## Current scope (v0)
 
-- **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, and each request goes upstream with `Connection: close`. WebSocket upgrades to a bound host aren't supported.
+- **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, not HTTP/2. A client that keeps its connection open gets one upstream connection for as long as it does, so repeated requests skip the TLS handshake; plain HTTP is still one request per connection. WebSocket upgrades to a bound host aren't supported.
 - **The client must honor the proxy and CA variables above.** curl, Python (`urllib`, `requests`), OpenSSL-based tools and Node 24.5+ do. Clients that only read the OS keychain (for example Go binaries on macOS) or that pin certificates won't work against bound hosts, and fail with a TLS error instead of leaking anything.
 - **One passphrase prompt per `hush run`.** There's no background agent: each `hush run` holds its own decrypted secrets and proxy for as long as its command runs. For the main use, `hush run -- claude`, that's one prompt per session. Ctrl-C goes to the command; `hush run` ignores it and stays up for as long as the command does.
 - **No nesting.** A `hush run` inside another one refuses to start. The outer run's placeholders and proxy are already in place there.
