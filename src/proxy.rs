@@ -312,7 +312,9 @@ fn forward<C: Read + Write, U: Read + Write>(
     let keep_alive = reuse && req.version == 1 && !connection_has(&req.headers, "close");
 
     let mut headers = req.headers;
-    substitute_placeholders(&mut headers, target_host, cleartext, table);
+    if names_only(&headers, path, target_host) {
+        substitute_placeholders(&mut headers, target_host, cleartext, table);
+    }
     headers.retain(|(k, _)| !HOP_BY_HOP.iter().any(|h| k.eq_ignore_ascii_case(h)));
     if !keep_alive {
         headers.push(("Connection".to_string(), "close".to_string()));
@@ -691,6 +693,38 @@ fn resolve_target(raw_path: &str, host_header: Option<&str>) -> Result<(String, 
     Ok((host, port, raw_path.to_string()))
 }
 
+/// Whether everything in the request that names a host names `target_host`:
+/// every `Host` header (at least one) and the authority of an absolute-form
+/// request target. The connection goes to `target_host` either way, but a
+/// server shared between sites, such as a CDN, routes on these, so a request
+/// that names another site would carry the real value to that site's origin.
+/// Such a request is forwarded as it came, placeholder included. Ports are
+/// not compared, as for bindings.
+fn names_only(headers: &[(String, String)], path: &str, target_host: &str) -> bool {
+    let is_target = |authority: &str| {
+        split_host_port(authority.trim(), 0)
+            .0
+            .eq_ignore_ascii_case(target_host)
+    };
+    let mut hosts = headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("host"))
+        .map(|(_, v)| v.as_str())
+        .peekable();
+    if hosts.peek().is_none() || !hosts.all(is_target) {
+        return false;
+    }
+    if path.starts_with('/') || path == "*" {
+        return true;
+    }
+    path.split_once("://").is_some_and(|(_, rest)| {
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..end];
+        // A URI's authority may carry userinfo; a `Host` header may not.
+        is_target(authority.rsplit_once('@').map_or(authority, |(_, a)| a))
+    })
+}
+
 fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) if !p.contains(']') => match p.parse::<u16>() {
@@ -922,6 +956,41 @@ mod tests {
         ];
         assert_eq!(body_framing(&h).unwrap(), Body::Chunked);
         assert_eq!(body_framing(&[]).unwrap(), Body::None);
+    }
+
+    #[test]
+    fn names_only_checks_every_host_header_and_an_absolute_target() {
+        let h = |values: &[&str]| -> Vec<(String, String)> {
+            values
+                .iter()
+                .map(|v| ("Host".to_string(), v.to_string()))
+                .collect()
+        };
+        let api = "api.example.com";
+
+        assert!(names_only(&h(&[api]), "/v1", api));
+        assert!(names_only(&h(&["API.example.com:8443"]), "*", api));
+        assert!(names_only(&h(&["[::1]:8443"]), "/", "::1"));
+        assert!(names_only(&h(&[api]), "https://api.example.com/v1", api));
+        assert!(names_only(
+            &h(&[api]),
+            "http://u:p@api.example.com:80?x",
+            api
+        ));
+
+        assert!(!names_only(&[], "/v1", api));
+        assert!(!names_only(&h(&["evil.example.com"]), "/v1", api));
+        assert!(!names_only(&h(&[api, "evil.example.com"]), "/v1", api));
+        assert!(!names_only(&h(&["api.example.com.evil.com"]), "/v1", api));
+        assert!(!names_only(&h(&["api.example.com@evil.com"]), "/v1", api));
+        assert!(!names_only(&h(&[api]), "https://evil.example.com/v1", api));
+        assert!(!names_only(&h(&["evil.com@api.example.com"]), "/v1", api));
+        assert!(!names_only(
+            &h(&[api]),
+            "https://api.example.com@evil.com/",
+            api
+        ));
+        assert!(!names_only(&h(&[api]), "evil.example.com/v1", api));
     }
 
     #[test]
@@ -1239,6 +1308,91 @@ mod tests {
         // header claims the bound name. Must be tunneled, never swapped.
         let (tcp, _) = connect(proxy, &format!("127.0.0.1:{}", up.port));
         roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
+
+        let seen = received(&up).unwrap();
+        assert!(
+            seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")),
+            "{seen}"
+        );
+        assert!(!seen.contains("REAL"), "{seen}");
+    }
+
+    /// The upstream stands in for a CDN that routes on what the request
+    /// itself names: the key must not go out under another site's name.
+    #[test]
+    fn request_naming_another_host_is_not_swapped() {
+        let post = chunked_post();
+        for (case, request) in [
+            (
+                "other Host",
+                post.replacen("Host: localhost", "Host: attacker.example", 1),
+            ),
+            (
+                "second Host",
+                post.replacen(
+                    "Host: localhost",
+                    "Host: localhost\r\nHost: attacker.example",
+                    1,
+                ),
+            ),
+            ("no Host", post.replacen("Host: localhost\r\n", "", 1)),
+            (
+                "absolute-form target",
+                post.replacen("/v1", "https://attacker.example/v1", 1),
+            ),
+        ] {
+            let up = spawn_upstream(true);
+            let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+
+            let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+            roundtrip(&mut tls_client(tcp, mitm.ca_der()), &request);
+
+            let seen = received(&up).unwrap();
+            assert!(
+                seen.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")),
+                "{case}: {seen}"
+            );
+            assert!(!seen.contains("REAL"), "{case}: {seen}");
+        }
+    }
+
+    #[test]
+    fn request_naming_the_bound_host_in_any_form_is_swapped() {
+        let post = chunked_post();
+        for (case, request) in [
+            (
+                "Host with port and other case",
+                post.replacen("Host: localhost", "Host: LOCALHOST:8443", 1),
+            ),
+            (
+                "absolute-form target",
+                post.replacen("/v1", "https://user@localhost:8443/v1", 1),
+            ),
+        ] {
+            let up = spawn_upstream(true);
+            let (proxy, mitm) = start(table_bound_to("localhost"), &[&up.cert]);
+
+            let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+            roundtrip(&mut tls_client(tcp, mitm.ca_der()), &request);
+
+            let seen = received(&up).unwrap();
+            assert!(
+                seen.contains("Authorization: Bearer REAL\r\n"),
+                "{case}: {seen}"
+            );
+        }
+    }
+
+    #[test]
+    fn plain_http_with_a_host_header_naming_another_host_is_not_swapped() {
+        let up = spawn_upstream(false);
+        let (proxy, _mitm) = start(table_bound_to("localhost"), &[]);
+
+        let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+        let request = chunked_post()
+            .replacen("/v1", &format!("http://localhost:{}/v1", up.port), 1)
+            .replacen("Host: localhost", "Host: attacker.example", 1);
+        roundtrip(&mut tcp, &request);
 
         let seen = received(&up).unwrap();
         assert!(
