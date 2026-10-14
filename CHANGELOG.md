@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.4 (2026-10-14)
+
+- Send the key only when the request names no host other than the bound one. (#14)
+
 ## 0.1.3 (2026-10-13)
 
 - Keep intercepted HTTPS connections open, reusing one upstream connection per client connection. (#13)
