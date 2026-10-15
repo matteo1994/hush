@@ -63,6 +63,10 @@ The CA is generated when `hush run` starts and its private key only ever exists 
 
 A plain-HTTP request to a bound host only gets the real value when the proxy's upstream connection is to a loopback address, such as a local dev server. Anywhere else the key would cross the network unencrypted, so the placeholder goes out verbatim instead. To allow that for a host you trust anyway, such as one on a private network, bind it with `--allow-http`.
 
+### Ports
+
+`--host` can name a port, such as `--host api.example.com:8443`; the real value then goes only to that port. Without one, any port of the bound host will do. A server on your own machine always needs one (`--host localhost:3000`): any program there, including the agent, can listen on its other ports. `secret add` and `secret bind` refuse a loopback host without a port, and `hush run` warns about such a binding made before, which is never sent.
+
 ## Usage
 
 ```bash
@@ -74,6 +78,7 @@ hush secret add BILLING_API_KEY --host api.example.com
 
 # Add another binding for a different environment
 hush secret bind BILLING_API_KEY --host billing-staging.internal --env staging --allow-http
+hush secret bind BILLING_API_KEY --host localhost:3000 --env dev   # a local dev server
 
 hush secret ls                              # list names + bindings, never values
 hush secret rm BILLING_API_KEY
