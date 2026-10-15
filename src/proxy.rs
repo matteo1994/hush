@@ -304,7 +304,18 @@ fn forward<C: Read + Write, U: Read + Write>(
     upstream: &mut BufReader<U>,
     reuse: bool,
 ) -> Result<bool> {
-    let body = body_framing(&req.headers)?;
+    let body = match request_framing(&req.headers) {
+        Ok(body) => body,
+        Err(e) => {
+            // Nothing has gone upstream yet, and the client's next bytes can't
+            // be trusted to start a request, so both connections end here.
+            let _ = client.get_mut().write_all(
+                b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            );
+            let _ = client.get_mut().flush();
+            return Err(e);
+        }
+    };
     let expects_continue = req.headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("expect") && v.trim().eq_ignore_ascii_case("100-continue")
     });
@@ -402,6 +413,48 @@ enum Body {
     UntilClose,
 }
 
+/// How a request's body ends. Stricter than `body_framing`: anything a server
+/// could read differently is refused, since the proxy and the server must
+/// agree on where each request on a kept-alive connection ends. That means
+/// both `Transfer-Encoding` and `Content-Length`, `chunked` that isn't the
+/// final coding or appears twice, and lengths that disagree or aren't plain
+/// digits.
+fn request_framing(headers: &[(String, String)]) -> Result<Body> {
+    let values = |name: &str| -> Vec<String> {
+        headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .flat_map(|(_, v)| v.split(','))
+            .map(|v| v.trim().to_ascii_lowercase())
+            .collect()
+    };
+    let codings = values("transfer-encoding");
+    let lengths = values("content-length");
+
+    if !codings.is_empty() {
+        if !lengths.is_empty() {
+            bail!("request has both Transfer-Encoding and Content-Length");
+        }
+        let chunked = codings.iter().filter(|c| *c == "chunked").count();
+        if chunked != 1 || codings.last().map(String::as_str) != Some("chunked") {
+            bail!("request Transfer-Encoding must end in a single chunked");
+        }
+        return Ok(Body::Chunked);
+    }
+    let Some(first) = lengths.first() else {
+        return Ok(Body::None);
+    };
+    if lengths.iter().any(|l| l != first) {
+        bail!("request has conflicting Content-Length values");
+    }
+    if first.is_empty() || !first.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("invalid Content-Length {first:?}");
+    }
+    Ok(Body::Length(
+        first.parse().context("invalid Content-Length")?,
+    ))
+}
+
 fn body_framing(headers: &[(String, String)]) -> Result<Body> {
     if let Some(te) = header_value(headers, "transfer-encoding")
         && te.to_ascii_lowercase().contains("chunked")
@@ -450,9 +503,7 @@ fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Resu
         Body::Chunked => loop {
             let line = read_line(src)?;
             dst.write_all(line.as_bytes())?;
-            let size = line.trim_end().split(';').next().unwrap_or("").trim();
-            let size = u64::from_str_radix(size, 16)
-                .with_context(|| format!("invalid chunk size {size:?}"))?;
+            let size = chunk_size(&line)?;
             if size == 0 {
                 // Trailer section, terminated by an empty line.
                 loop {
@@ -463,9 +514,33 @@ fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Resu
                     }
                 }
             }
-            copy_exact(src, dst, size + 2)?; // chunk data + CRLF
+            copy_exact(src, dst, size)?;
+            let mut crlf = [0; 2];
+            src.read_exact(&mut crlf)
+                .context("connection closed mid-body")?;
+            if &crlf != b"\r\n" {
+                bail!("chunk data longer than its size");
+            }
+            dst.write_all(&crlf)?;
         },
     }
+}
+
+/// The size from a chunk-size line: hex digits only, then optional
+/// extensions, ended by CRLF.
+fn chunk_size(line: &str) -> Result<u64> {
+    let Some(line) = line.strip_suffix("\r\n") else {
+        bail!("chunk-size line not ended by CRLF");
+    };
+    let size = line
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([' ', '\t']);
+    if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("invalid chunk size {size:?}");
+    }
+    u64::from_str_radix(size, 16).with_context(|| format!("chunk size {size:?} too large"))
 }
 
 fn copy_exact<R: Read, W: Write>(src: &mut R, dst: &mut W, n: u64) -> Result<()> {
@@ -1049,6 +1124,83 @@ mod tests {
         ];
         assert_eq!(body_framing(&h).unwrap(), Body::Chunked);
         assert_eq!(body_framing(&[]).unwrap(), Body::None);
+    }
+
+    fn framing_of(pairs: &[(&str, &str)]) -> Result<Body> {
+        let h: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        request_framing(&h)
+    }
+
+    /// A request whose length could be read two ways is refused: the proxy
+    /// and the server must never disagree on where it ends.
+    #[test]
+    fn request_framing_refuses_anything_ambiguous() {
+        let te = "Transfer-Encoding";
+        let cl = "Content-Length";
+        assert_eq!(framing_of(&[]).unwrap(), Body::None);
+        assert_eq!(framing_of(&[(cl, "5")]).unwrap(), Body::Length(5));
+        assert_eq!(
+            framing_of(&[(cl, "5"), (cl, "5")]).unwrap(),
+            Body::Length(5)
+        );
+        assert_eq!(framing_of(&[(te, "Chunked")]).unwrap(), Body::Chunked);
+        assert_eq!(framing_of(&[(te, "gzip, chunked")]).unwrap(), Body::Chunked);
+
+        for (case, pairs) in [
+            ("both", vec![(te, "chunked"), (cl, "5")]),
+            ("conflicting lengths", vec![(cl, "5"), (cl, "6")]),
+            ("length list", vec![(cl, "5, 6")]),
+            ("signed length", vec![(cl, "+5")]),
+            ("empty length", vec![(cl, "")]),
+            ("chunked not last", vec![(te, "chunked, gzip")]),
+            ("not chunked", vec![(te, "gzip")]),
+            ("chunked lookalike", vec![(te, "xchunked")]),
+            ("chunked twice", vec![(te, "chunked"), (te, "chunked")]),
+        ] {
+            assert!(framing_of(&pairs).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn chunked_body_must_be_well_formed() {
+        let copy = |body: &str| {
+            let mut out = Vec::new();
+            copy_body(&mut body.as_bytes(), &mut out, Body::Chunked).map(|_| out)
+        };
+        assert!(copy("5\r\nhello\r\n0\r\n\r\n").is_ok());
+        assert!(copy("5;ext=1\r\nhello\r\n0\r\n\r\n").is_ok());
+        for (case, body) in [
+            ("signed size", "+5\r\nhello\r\n0\r\n\r\n"),
+            ("empty size", "\r\nhello\r\n0\r\n\r\n"),
+            ("bare LF", "5\nhello\r\n0\r\n\r\n"),
+            ("data longer than size", "3\r\nhello\r\n0\r\n\r\n"),
+            ("space inside size", "0 5\r\nhello\r\n0\r\n\r\n"),
+        ] {
+            assert!(copy(body).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn ambiguous_request_gets_400_and_never_reaches_the_upstream() {
+        let up = spawn_upstream(true);
+        let (proxy, mitm) = start(
+            table_bound_to(&format!("localhost:{}", up.port)),
+            &[&up.cert],
+        );
+
+        let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
+        let request = chunked_post().replacen(
+            "Transfer-Encoding",
+            "Content-Length: 5\r\nTransfer-Encoding",
+            1,
+        );
+        let resp = roundtrip(&mut tls_client(tcp, mitm.ca_der()), &request);
+
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+        assert_eq!(received(&up), None, "upstream must not get a request");
     }
 
     #[test]
