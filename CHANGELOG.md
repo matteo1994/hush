@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.5 (2026-10-15)
+
+- Send a key to a server on this machine only on the port its binding names. (#15)
+
 ## 0.1.4 (2026-10-14)
 
 - Send the key only when the request names no host other than the bound one. (#14)
