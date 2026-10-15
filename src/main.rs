@@ -189,6 +189,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             allow_http,
             force,
         } => {
+            vault::check_host(&host)?;
             let binding = Binding::new(host, env, header, format, allow_http);
             let replacing = if force {
                 ", replacing it if it exists"
@@ -231,6 +232,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             format,
             allow_http,
         } => {
+            vault::check_host(&host)?;
             let binding = Binding::new(host, env, header, format, allow_http);
             eprintln!("binding {name} to {}", describe(&binding));
             let pass = passphrase()?;

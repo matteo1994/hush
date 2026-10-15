@@ -48,6 +48,69 @@ impl Binding {
     }
 }
 
+impl Binding {
+    /// The bound host's name, and the port `--host` named, if any.
+    pub fn host_and_port(&self) -> (String, Option<u16>) {
+        split_host(&self.host)
+    }
+}
+
+/// Splits `--host` into a name and an optional port: `api.example.com`,
+/// `localhost:3000`, `[::1]:3000`. A bare IPv6 address has no port. An
+/// unparsable port stays part of the name, which then matches nothing.
+pub fn split_host(host: &str) -> (String, Option<u16>) {
+    if let Some(rest) = host.strip_prefix('[')
+        && let Some((name, after)) = rest.split_once(']')
+    {
+        let port = after.strip_prefix(':').and_then(|p| p.parse().ok());
+        return (name.to_string(), port);
+    }
+    match host.split_once(':') {
+        Some((name, port)) if !port.contains(':') => match port.parse() {
+            Ok(port) => (name.to_string(), Some(port)),
+            Err(_) => (host.to_string(), None),
+        },
+        _ => (host.to_string(), None),
+    }
+}
+
+/// Whether `name` always means this machine. A name that only resolves to
+/// it, through `/etc/hosts` say, isn't caught here; the proxy checks the
+/// address it actually connected to.
+pub fn is_loopback_name(name: &str) -> bool {
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
+}
+
+/// Refuses a `--host` that can never be used: a port that isn't one, or a
+/// loopback host without a port. On this machine every port is open to the
+/// child, so the key is only ever sent to a loopback server on the port its
+/// binding names.
+pub fn check_host(host: &str) -> Result<()> {
+    if host.is_empty() {
+        bail!("--host is empty");
+    }
+    let (name, port) = split_host(host);
+    if name.contains(':') && !name.contains("::") && name.parse::<std::net::IpAddr>().is_err() {
+        bail!("--host {host}: not a valid port");
+    }
+    if port.is_none() && is_loopback_name(&name) {
+        bail!(
+            "--host {host} needs a port, such as {}:3000: any program on this machine can listen on its other ports",
+            if name.contains(':') {
+                format!("[{name}]")
+            } else {
+                name
+            }
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub value: String,
@@ -236,6 +299,49 @@ fn set_owner_only(path: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_a_host_and_its_port() {
+        assert_eq!(
+            split_host("api.example.com"),
+            ("api.example.com".into(), None)
+        );
+        assert_eq!(
+            split_host("localhost:3000"),
+            ("localhost".into(), Some(3000))
+        );
+        assert_eq!(split_host("[::1]:3000"), ("::1".into(), Some(3000)));
+        assert_eq!(split_host("[::1]"), ("::1".into(), None));
+        assert_eq!(split_host("::1"), ("::1".into(), None));
+        assert_eq!(split_host("localhost:x"), ("localhost:x".into(), None));
+    }
+
+    #[test]
+    fn loopback_hosts_need_a_port() {
+        for host in [
+            "localhost",
+            "LOCALHOST.",
+            "app.localhost",
+            "127.0.0.1",
+            "127.1.2.3",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(check_host(host).is_err(), "{host}");
+        }
+        for host in [
+            "localhost:3000",
+            "127.0.0.1:8080",
+            "[::1]:3000",
+            "api.example.com",
+            "10.0.0.5",
+            "api.example.com:8443",
+        ] {
+            assert!(check_host(host).is_ok(), "{host}");
+        }
+        assert!(check_host("localhost:x").is_err());
+        assert!(check_host("").is_err());
+    }
 
     #[test]
     fn add_binding_refuses_a_second_binding_for_the_same_env() {
