@@ -1,0 +1,36 @@
+[package]
+name = "hush-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+hush = { path = ".." }
+
+# Its own workspace, so the main crate's builds and lockfile never see it.
+[workspace]
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "response"
+path = "fuzz_targets/response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scrub"
+path = "fuzz_targets/scrub.rs"
+test = false
+doc = false
+bench = false

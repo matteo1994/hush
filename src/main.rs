@@ -1,16 +1,11 @@
-mod names;
-mod proxy;
-mod run;
-mod tls;
-mod vault;
-
 use std::io::{BufRead, BufReader, Write};
 use std::process::ExitCode;
 
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
-use vault::Binding;
+use hush::vault::Binding;
+use hush::{names, run, vault};
 
 /// Reads a secret input interactively (hidden), or from an env var for
 /// scripting/testing — same escape hatch pattern as e.g. `murk --stdin`.
