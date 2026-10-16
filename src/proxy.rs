@@ -1170,6 +1170,82 @@ mod tests {
         }
     }
 
+    /// Plain HTTP takes the host from an absolute-form target or the `Host`
+    /// header (`resolve_target`), and the request must name no other
+    /// (`names_only`); odd spellings there fail closed too.
+    #[test]
+    fn odd_spellings_in_a_plain_http_request_fail_closed() {
+        let ph = format!("Bearer {PLACEHOLDER}");
+        let table = table_with("api.example.com", true);
+        for (request_target, host_header, expected) in [
+            (
+                "http://API.example.com/v1",
+                "api.example.com",
+                "Bearer REAL",
+            ),
+            ("http://api.example.com", "api.example.com", "Bearer REAL"),
+            // Not stripped as absolute-form, so the Host header picks the
+            // host, and `names_only` checks the target names the same one.
+            (
+                "HTTP://api.example.com/v1",
+                "api.example.com",
+                "Bearer REAL",
+            ),
+            ("HTTP://evil.com/v1", "api.example.com", ph.as_str()),
+            (
+                "http://api.example.com./v1",
+                "api.example.com.",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com@evil.com/v1",
+                "evil.com",
+                ph.as_str(),
+            ),
+            (
+                "http://evil.com@api.example.com/v1",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com:80:80/v1",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com?@evil.com/",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com#@evil.com/",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            ("http://api.example.com/v1", "evil.com", ph.as_str()),
+            ("/v1", "api.example.com.", ph.as_str()),
+            ("/v1", "api.example.com:80:80", ph.as_str()),
+            ("/v1", "api.example.com@evil.com", ph.as_str()),
+        ] {
+            let mut headers = vec![("Host".to_string(), host_header.to_string())];
+            headers.extend(auth_headers());
+            // As `handle_connection` and `forward` do.
+            let (host, port, path) = resolve_target(request_target, Some(host_header)).unwrap();
+            let target = Target {
+                port,
+                tls: false,
+                ..remote(&host)
+            };
+            if names_only(&headers, &path, target.host) {
+                substitute_placeholders(&mut headers, &target, &table);
+            }
+            assert_eq!(
+                headers[1].1, expected,
+                "target={request_target} host={host_header}"
+            );
+        }
+    }
+
     fn scrub_in_pieces(secrets: &[&str], pieces: &[&str]) -> String {
         let mut scrubber = Scrubber::new(secrets.iter().map(|s| s.to_string()).collect());
         let mut out = Vec::new();
