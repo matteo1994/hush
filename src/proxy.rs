@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -141,7 +141,7 @@ fn handle_connection(client: TcpStream, table: &PlaceholderTable, mitm: &Mitm) -
         host: &host,
         port,
         tls: false,
-        loopback: is_loopback(&upstream)?,
+        peer: upstream.peer_addr()?,
     };
     // One request per connection here: the next could name a different host.
     forward(
@@ -182,7 +182,13 @@ fn handle_connect(
     };
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
 
-    if !is_bound_host(table, host) {
+    let target = Target {
+        host,
+        port,
+        tls: true,
+        peer: upstream.peer_addr()?,
+    };
+    if !is_bound(table, &target) {
         return tunnel(client, &leftover, upstream);
     }
     if !leftover.is_empty() {
@@ -190,12 +196,6 @@ fn handle_connect(
     }
 
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
-    let target = Target {
-        host,
-        port,
-        tls: true,
-        loopback: is_loopback(&upstream)?,
-    };
     let server_name =
         ServerName::try_from(host.to_string()).with_context(|| format!("invalid host {host}"))?;
     let mut upstream = BufReader::new(StreamOwned::new(
@@ -329,7 +329,7 @@ fn forward<C: Read + Write, U: Read + Write>(
     if !keep_alive {
         headers.push(("Connection".to_string(), "close".to_string()));
     }
-    let scrubber = if is_bound_host(table, target.host) {
+    let scrubber = if is_bound(table, target) {
         // A missing Accept-Encoding means any coding is acceptable, so ask for
         // `identity` explicitly: a compressed response can't be scanned.
         headers.retain(|(k, _)| !k.eq_ignore_ascii_case("accept-encoding"));
@@ -823,49 +823,55 @@ fn real_values(table: &PlaceholderTable) -> Vec<String> {
         .collect()
 }
 
-fn is_bound_host(table: &PlaceholderTable, host: &str) -> bool {
-    table
-        .lock()
-        .unwrap()
-        .values()
-        .any(|e| e.host.eq_ignore_ascii_case(host))
+/// Whether some placeholder may be swapped on the way to `target`. Only
+/// such connections are intercepted, and only their responses scrubbed.
+fn is_bound(table: &PlaceholderTable, target: &Target) -> bool {
+    table.lock().unwrap().values().any(|e| target.matches(e))
 }
 
 /// Where a request is going, as the proxy connected to it.
 struct Target<'a> {
+    /// The name the request used.
     host: &'a str,
     port: u16,
     tls: bool,
-    /// Judged by the address actually connected to, not the name, so a bound
-    /// name that resolves off-machine doesn't count as local.
-    loopback: bool,
+    /// The address actually connected to.
+    peer: SocketAddr,
 }
 
 impl Target<'_> {
+    /// Judged by the address connected to, not the name, so a bound name
+    /// that resolves off-machine doesn't count as local.
+    fn loopback(&self) -> bool {
+        self.peer.ip().to_canonical().is_loopback()
+    }
+
     /// Plain HTTP off this machine: the request crosses the network unencrypted.
     fn cleartext(&self) -> bool {
-        !self.tls && !self.loopback
+        !self.tls && !self.loopback()
     }
 
     fn matches(&self, entry: &PlaceholderEntry) -> bool {
-        let port_ok = match entry.port {
-            Some(port) => port == self.port,
-            // On this machine the child can listen on any other port.
-            None => !self.loopback,
-        };
+        if self.loopback() {
+            // On this machine the child can listen on any port, and on the
+            // other address family of a port, so only the exact socket the
+            // binding names will do, whatever name the request used.
+            return entry.port == Some(self.peer.port())
+                && entry
+                    .host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|ip| ip.to_canonical() == self.peer.ip().to_canonical());
+        }
         self.host.eq_ignore_ascii_case(&entry.host)
-            && port_ok
+            && entry.port.is_none_or(|port| port == self.port)
             && (!self.cleartext() || entry.allow_http)
     }
 }
 
-fn is_loopback(upstream: &TcpStream) -> Result<bool> {
-    Ok(upstream.peer_addr()?.ip().to_canonical().is_loopback())
-}
-
 /// A `cleartext` request (plain HTTP off this machine) only gets the real
 /// value for bindings that opted in with `allow_http`, and a loopback one only
-/// for bindings that name its port; otherwise the placeholder goes out
+/// for bindings that name the address and port connected to; otherwise the
+/// placeholder goes out
 /// verbatim, as for any other non-matching request.
 fn substitute_placeholders(
     headers: &mut [(String, String)],
@@ -932,7 +938,7 @@ mod tests {
             host,
             port: 443,
             tls: true,
-            loopback: false,
+            peer: "203.0.113.7:443".parse().unwrap(),
         }
     }
 
@@ -991,41 +997,93 @@ mod tests {
     }
 
     #[test]
-    fn a_port_in_the_binding_must_match_and_loopback_needs_one() {
+    fn a_port_in_the_binding_must_match() {
         let ph = format!("Bearer {PLACEHOLDER}");
-        let local = |port| Target {
-            host: "localhost",
-            port,
+        for (bound, expected) in [
+            ("api.example.com", "Bearer REAL"),
+            ("api.example.com:443", "Bearer REAL"),
+            ("api.example.com:8443", ph.as_str()),
+        ] {
+            let got = swapped(
+                &table_bound_to(bound),
+                &remote("api.example.com"),
+                &auth_headers(),
+            );
+            assert_eq!(got, expected, "bound={bound}");
+        }
+    }
+
+    /// On this machine only the exact socket a binding names will do,
+    /// whatever name the request used.
+    #[test]
+    fn loopback_binding_matches_only_the_socket_connected_to() {
+        let ph = format!("Bearer {PLACEHOLDER}");
+        let local = |host, peer: &str| Target {
+            host,
+            port: 3000,
             tls: false,
-            loopback: true,
+            peer: peer.parse().unwrap(),
         };
         for (bound, target, expected) in [
-            ("api.example.com", remote("api.example.com"), "Bearer REAL"),
             (
-                "api.example.com:443",
-                remote("api.example.com"),
+                "127.0.0.1:3000",
+                local("localhost", "127.0.0.1:3000"),
                 "Bearer REAL",
             ),
             (
-                "api.example.com:8443",
-                remote("api.example.com"),
+                "127.0.0.1:3000",
+                local("127.0.0.1", "127.0.0.1:3000"),
+                "Bearer REAL",
+            ),
+            (
+                "127.0.0.1:3000",
+                local("localhost", "[::ffff:127.0.0.1]:3000"),
+                "Bearer REAL",
+            ),
+            (
+                "[::1]:3000",
+                local("localhost", "[::1]:3000"),
+                "Bearer REAL",
+            ),
+            (
+                "127.0.0.1:3000",
+                local("localhost", "[::1]:3000"),
                 ph.as_str(),
             ),
-            ("localhost:3000", local(3000), "Bearer REAL"),
-            ("localhost:3000", local(3001), ph.as_str()),
-            ("localhost", local(3000), ph.as_str()),
-            // A name bound without a port that resolves to this machine.
+            (
+                "127.0.0.1:3000",
+                local("localhost", "127.0.0.2:3000"),
+                ph.as_str(),
+            ),
+            (
+                "127.0.0.1:3000",
+                local("localhost", "127.0.0.1:3001"),
+                ph.as_str(),
+            ),
+            (
+                "localhost:3000",
+                local("localhost", "127.0.0.1:3000"),
+                ph.as_str(),
+            ),
+            (
+                "localhost",
+                local("localhost", "127.0.0.1:3000"),
+                ph.as_str(),
+            ),
+            // A name that resolves to this machine, bound with or without a port.
             (
                 "api.example.com",
-                Target {
-                    loopback: true,
-                    ..remote("api.example.com")
-                },
+                local("api.example.com", "127.0.0.1:3000"),
+                ph.as_str(),
+            ),
+            (
+                "api.example.com:3000",
+                local("api.example.com", "127.0.0.1:3000"),
                 ph.as_str(),
             ),
         ] {
             let got = swapped(&table_bound_to(bound), &target, &auth_headers());
-            assert_eq!(got, expected, "bound={bound} port={}", target.port);
+            assert_eq!(got, expected, "bound={bound} peer={}", target.peer);
         }
     }
 
@@ -1187,7 +1245,7 @@ mod tests {
     fn ambiguous_request_gets_400_and_never_reaches_the_upstream() {
         let up = spawn_upstream(true);
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
 
@@ -1496,7 +1554,7 @@ mod tests {
     fn https_to_bound_host_is_intercepted_and_swapped() {
         let up = spawn_upstream(true);
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
 
@@ -1517,7 +1575,7 @@ mod tests {
     fn bound_host_is_asked_for_an_uncompressed_response() {
         let up = spawn_upstream(true);
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
 
@@ -1551,15 +1609,12 @@ mod tests {
     }
 
     #[test]
-    fn swap_follows_connect_target_not_inner_host_header() {
+    fn connect_to_another_loopback_socket_is_tunneled_untouched() {
         let up = spawn_upstream(true);
-        let (proxy, _mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
-            &[&up.cert],
-        );
+        // Bound to the same port on the other address family: the server the
+        // proxy reaches isn't the bound one, whatever the request calls it.
+        let (proxy, _mitm) = start(table_bound_to(&format!("[::1]:{}", up.port)), &[&up.cert]);
 
-        // Same server, reached under a name that isn't bound; the inner Host
-        // header claims the bound name. Must be tunneled, never swapped.
         let (tcp, _) = connect(proxy, &format!("127.0.0.1:{}", up.port));
         roundtrip(&mut tls_client(tcp, &up.cert), &chunked_post());
 
@@ -1597,7 +1652,7 @@ mod tests {
         ] {
             let up = spawn_upstream(true);
             let (proxy, mitm) = start(
-                table_bound_to(&format!("localhost:{}", up.port)),
+                table_bound_to(&format!("127.0.0.1:{}", up.port)),
                 &[&up.cert],
             );
 
@@ -1628,7 +1683,7 @@ mod tests {
         ] {
             let up = spawn_upstream(true);
             let (proxy, mitm) = start(
-                table_bound_to(&format!("localhost:{}", up.port)),
+                table_bound_to(&format!("127.0.0.1:{}", up.port)),
                 &[&up.cert],
             );
 
@@ -1646,7 +1701,7 @@ mod tests {
     #[test]
     fn plain_http_with_a_host_header_naming_another_host_is_not_swapped() {
         let up = spawn_upstream(false);
-        let (proxy, _mitm) = start(table_bound_to(&format!("localhost:{}", up.port)), &[]);
+        let (proxy, _mitm) = start(table_bound_to(&format!("127.0.0.1:{}", up.port)), &[]);
 
         let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
         let request = chunked_post()
@@ -1668,7 +1723,7 @@ mod tests {
         let unrelated = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
         // The proxy trusts some other cert, so the upstream fails verification.
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[unrelated.cert.der()],
         );
 
@@ -1683,7 +1738,7 @@ mod tests {
     fn https_content_length_body_with_expect_continue_and_hop_by_hop_stripped() {
         let up = spawn_upstream(true);
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
         let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
@@ -1717,7 +1772,7 @@ mod tests {
     fn intercepted_connection_carries_several_requests_over_one_upstream_connection() {
         let up = spawn_keep_alive_upstream();
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
         let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
@@ -1751,7 +1806,7 @@ mod tests {
     fn client_asking_to_close_ends_both_connections() {
         let up = spawn_keep_alive_upstream();
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
         let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
@@ -1768,7 +1823,7 @@ mod tests {
     fn upstream_dropping_an_idle_connection_closes_the_client_side() {
         let up = spawn_keep_alive_upstream();
         let (proxy, mitm) = start(
-            table_bound_to(&format!("localhost:{}", up.port)),
+            table_bound_to(&format!("127.0.0.1:{}", up.port)),
             &[&up.cert],
         );
         let (tcp, _) = connect(proxy, &format!("localhost:{}", up.port));
@@ -1836,7 +1891,7 @@ mod tests {
         ] {
             let up = spawn_upstream(false);
             let bound = if bound == "localhost" {
-                format!("localhost:{}", up.port)
+                format!("127.0.0.1:{}", up.port)
             } else {
                 bound.to_string()
             };
@@ -1869,7 +1924,7 @@ mod tests {
         for (bound, expected) in [
             ("localhost".to_string(), format!("Bearer {PLACEHOLDER}")),
             (
-                format!("localhost:{dev_port}"),
+                format!("127.0.0.1:{dev_port}"),
                 format!("Bearer {PLACEHOLDER}"),
             ),
         ] {
@@ -1892,11 +1947,46 @@ mod tests {
         }
     }
 
+    /// `localhost` names two sockets per port, `127.0.0.1` and `::1`. With
+    /// the dev server on one, the child can listen on the other.
+    #[test]
+    fn loopback_key_goes_only_to_the_address_its_binding_names() {
+        let dev_server = spawn_upstream(false);
+        let Ok(childs_listener) = TcpListener::bind(("::1", dev_server.port)) else {
+            eprintln!("no IPv6 loopback here; skipping");
+            return;
+        };
+        let (tx, childs) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            if let Ok((mut s, _)) = childs_listener.accept() {
+                let _ = tx.send(echo_one(&mut s).ok());
+            }
+        });
+        let (proxy, _mitm) = start(
+            table_bound_to(&format!("127.0.0.1:{}", dev_server.port)),
+            &[],
+        );
+
+        let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+        let request = chunked_post().replacen(
+            "/v1",
+            &format!("http://localhost:{}/v1", dev_server.port),
+            1,
+        );
+        roundtrip(&mut tcp, &request);
+
+        let child_saw = childs.recv_timeout(Duration::from_secs(1)).ok().flatten();
+        assert!(
+            !child_saw.as_deref().unwrap_or("").contains("REAL"),
+            "the child's [::1] listener got the key: {child_saw:?}"
+        );
+    }
+
     #[test]
     fn loopback_key_goes_to_the_port_its_binding_names() {
         let dev_server = spawn_upstream(false);
         let (proxy, _mitm) = start(
-            table_bound_to(&format!("localhost:{}", dev_server.port)),
+            table_bound_to(&format!("127.0.0.1:{}", dev_server.port)),
             &[],
         );
 

@@ -25,8 +25,8 @@ pub struct Minted {
     /// env var name → placeholder, for the child's environment.
     pub placeholders: HashMap<String, String>,
     pub unmatched: Vec<String>,
-    /// Names bound to a loopback host without a port, which are never sent.
-    pub portless_loopback: Vec<String>,
+    /// Names bound to this machine by name or without a port, never sent.
+    pub unusable_loopback: Vec<String>,
 }
 
 /// Mints a fresh placeholder for each requested name that has a binding for
@@ -36,15 +36,15 @@ pub fn mint(vault: &Vault, names: &[String], env: Option<&str>) -> Minted {
         table: HashMap::new(),
         placeholders: HashMap::new(),
         unmatched: Vec::new(),
-        portless_loopback: Vec::new(),
+        unusable_loopback: Vec::new(),
     };
     for name in names {
         match vault.find_binding(name, env) {
             Some((entry, binding)) => {
                 let placeholder = generate_placeholder();
                 let (host, port) = binding.host_and_port();
-                if port.is_none() && vault::is_loopback_name(&host) {
-                    minted.portless_loopback.push(name.clone());
+                if vault::unusable_loopback(&host, port) {
+                    minted.unusable_loopback.push(name.clone());
                 }
                 minted.table.insert(
                     placeholder.clone(),
@@ -137,9 +137,9 @@ pub fn run(
     for name in &minted.unmatched {
         eprintln!("hush: warning: {name} has no matching binding, not injected");
     }
-    for name in &minted.portless_loopback {
+    for name in &minted.unusable_loopback {
         eprintln!(
-            "hush: warning: {name} is bound to a loopback host without a port, so it is never sent; add it again with --host HOST:PORT"
+            "hush: warning: {name} is bound to this machine without an address and port, so it is never sent; add it again with --host 127.0.0.1:PORT or [::1]:PORT"
         );
     }
     if minted.table.is_empty() {
@@ -289,9 +289,13 @@ mod tests {
     }
 
     #[test]
-    fn reports_loopback_bindings_without_a_port() {
+    fn reports_loopback_bindings_without_an_address_and_port() {
         let mut v = Vault::new();
-        for (name, host) in [("DEV_KEY", "localhost"), ("PORTED_KEY", "localhost:3000")] {
+        for (name, host) in [
+            ("DEV_KEY", "localhost"),
+            ("NAMED_KEY", "localhost:3000"),
+            ("PORTED_KEY", "127.0.0.1:3000"),
+        ] {
             v.secrets.insert(
                 name.to_string(),
                 SecretEntry {
@@ -300,13 +304,17 @@ mod tests {
                 },
             );
         }
-        let m = mint(&v, &["DEV_KEY".into(), "PORTED_KEY".into()], None);
+        let names = ["DEV_KEY".into(), "NAMED_KEY".into(), "PORTED_KEY".into()];
+        let m = mint(&v, &names, None);
 
-        assert_eq!(m.portless_loopback, vec!["DEV_KEY".to_string()]);
+        assert_eq!(
+            m.unusable_loopback,
+            vec!["DEV_KEY".to_string(), "NAMED_KEY".to_string()]
+        );
         let ported = &m.table[&m.placeholders["PORTED_KEY"]];
         assert_eq!(
             (ported.host.as_str(), ported.port),
-            ("localhost", Some(3000))
+            ("127.0.0.1", Some(3000))
         );
     }
 

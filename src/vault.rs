@@ -86,10 +86,16 @@ pub fn is_loopback_name(name: &str) -> bool {
             .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
+/// Whether a binding to this machine can never be used. On this machine the
+/// child can listen on any port, and on the other address family of a port
+/// (`localhost` is both `127.0.0.1` and `::1`), so the proxy only sends a key
+/// to the exact socket a binding names: a loopback address and a port.
+pub fn unusable_loopback(name: &str, port: Option<u16>) -> bool {
+    is_loopback_name(name) && (port.is_none() || name.parse::<std::net::IpAddr>().is_err())
+}
+
 /// Refuses a `--host` that can never be used: a port that isn't one, or a
-/// loopback host without a port. On this machine every port is open to the
-/// child, so the key is only ever sent to a loopback server on the port its
-/// binding names.
+/// loopback host that isn't an address with a port.
 pub fn check_host(host: &str) -> Result<()> {
     if host.is_empty() {
         bail!("--host is empty");
@@ -98,14 +104,10 @@ pub fn check_host(host: &str) -> Result<()> {
     if name.contains(':') && !name.contains("::") && name.parse::<std::net::IpAddr>().is_err() {
         bail!("--host {host}: not a valid port");
     }
-    if port.is_none() && is_loopback_name(&name) {
+    if unusable_loopback(&name, port) {
         bail!(
-            "--host {host} needs a port, such as {}:3000: any program on this machine can listen on its other ports",
-            if name.contains(':') {
-                format!("[{name}]")
-            } else {
-                name
-            }
+            "--host {host}: a server on this machine needs its address and port, such as 127.0.0.1:{0} or [::1]:{0}, whichever it listens on; any program here can listen on another port or address family",
+            port.unwrap_or(3000)
         );
     }
     Ok(())
@@ -326,11 +328,12 @@ mod tests {
             "127.1.2.3",
             "::1",
             "[::1]",
+            "localhost:3000",
+            "app.localhost:3000",
         ] {
             assert!(check_host(host).is_err(), "{host}");
         }
         for host in [
-            "localhost:3000",
             "127.0.0.1:8080",
             "[::1]:3000",
             "api.example.com",
