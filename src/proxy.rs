@@ -142,6 +142,7 @@ fn handle_connection(client: TcpStream, table: &PlaceholderTable, mitm: &Mitm) -
         port,
         tls: false,
         peer: upstream.peer_addr()?,
+        local: upstream.local_addr()?,
     };
     // One request per connection here: the next could name a different host.
     forward(
@@ -187,6 +188,7 @@ fn handle_connect(
         port,
         tls: true,
         peer: upstream.peer_addr()?,
+        local: upstream.local_addr()?,
     };
     if !is_bound(table, &target) {
         return tunnel(client, &leftover, upstream);
@@ -837,22 +839,29 @@ struct Target<'a> {
     tls: bool,
     /// The address actually connected to.
     peer: SocketAddr,
+    /// This end of that connection.
+    local: SocketAddr,
 }
 
 impl Target<'_> {
-    /// Judged by the address connected to, not the name, so a bound name
-    /// that resolves off-machine doesn't count as local.
-    fn loopback(&self) -> bool {
-        self.peer.ip().to_canonical().is_loopback()
+    /// Whether the server is on this machine, where the child can listen
+    /// too. Judged by the connection, not the name, so a bound name that
+    /// resolves off-machine doesn't count. That covers loopback and every
+    /// other address of this machine, such as its LAN address, which a
+    /// connection to reaches through loopback with that same address on
+    /// both ends.
+    fn this_machine(&self) -> bool {
+        let peer = self.peer.ip().to_canonical();
+        peer.is_loopback() || peer == self.local.ip().to_canonical()
     }
 
     /// Plain HTTP off this machine: the request crosses the network unencrypted.
     fn cleartext(&self) -> bool {
-        !self.tls && !self.loopback()
+        !self.tls && !self.this_machine()
     }
 
     fn matches(&self, entry: &PlaceholderEntry) -> bool {
-        if self.loopback() {
+        if self.this_machine() {
             // On this machine the child can listen on any port, and on the
             // other address family of a port, so only the exact socket the
             // binding names will do, whatever name the request used.
@@ -871,8 +880,7 @@ impl Target<'_> {
 /// A `cleartext` request (plain HTTP off this machine) only gets the real
 /// value for bindings that opted in with `allow_http`, and a loopback one only
 /// for bindings that name the address and port connected to; otherwise the
-/// placeholder goes out
-/// verbatim, as for any other non-matching request.
+/// placeholder goes out verbatim, as for any other non-matching request.
 fn substitute_placeholders(
     headers: &mut [(String, String)],
     target: &Target,
@@ -939,6 +947,7 @@ mod tests {
             port: 443,
             tls: true,
             peer: "203.0.113.7:443".parse().unwrap(),
+            local: "198.51.100.2:50000".parse().unwrap(),
         }
     }
 
@@ -1023,6 +1032,7 @@ mod tests {
             port: 3000,
             tls: false,
             peer: peer.parse().unwrap(),
+            local: "127.0.0.1:50000".parse().unwrap(),
         };
         for (bound, target, expected) in [
             (
@@ -1084,6 +1094,155 @@ mod tests {
         ] {
             let got = swapped(&table_bound_to(bound), &target, &auth_headers());
             assert_eq!(got, expected, "bound={bound} peer={}", target.peer);
+        }
+    }
+
+    /// Another address of this machine, such as its LAN address, is as open
+    /// to the child as loopback: a key bound to it without a port, or by a
+    /// name, would go to whatever the child listens on there.
+    #[test]
+    fn another_address_of_this_machine_counts_as_loopback() {
+        let ph = format!("Bearer {PLACEHOLDER}");
+        let lan = |host| Target {
+            host,
+            port: 3000,
+            tls: false,
+            peer: "192.0.2.5:3000".parse().unwrap(),
+            local: "192.0.2.5:50000".parse().unwrap(),
+        };
+        for (bound, target, expected) in [
+            ("192.0.2.5:3000", lan("192.0.2.5"), "Bearer REAL"),
+            ("192.0.2.5:3000", lan("mymac.local"), "Bearer REAL"),
+            ("192.0.2.5", lan("192.0.2.5"), ph.as_str()),
+            ("192.0.2.5:3001", lan("192.0.2.5"), ph.as_str()),
+            ("mymac.local", lan("mymac.local"), ph.as_str()),
+            ("mymac.local:3000", lan("mymac.local"), ph.as_str()),
+        ] {
+            let got = swapped(&table_with(bound, true), &target, &auth_headers());
+            assert_eq!(got, expected, "bound={bound} host={}", target.host);
+        }
+    }
+
+    /// Off this machine the binding is matched against the name the request
+    /// used, and that same string is what gets resolved and, over TLS,
+    /// verified. So the only spelling that may match is the bound name in
+    /// another ASCII case; anything else fails closed.
+    #[test]
+    fn odd_spellings_of_a_bound_host_fail_closed() {
+        let ph = format!("Bearer {PLACEHOLDER}");
+        for (bound, authority, expected) in [
+            ("api.example.com", "API.Example.COM:443", "Bearer REAL"),
+            ("api.example.com", "api.example.com.:443", ph.as_str()),
+            (
+                "api.example.com",
+                "api.example.com@evil.com:443",
+                ph.as_str(),
+            ),
+            (
+                "api.example.com",
+                "evil.com@api.example.com:443",
+                ph.as_str(),
+            ),
+            ("api.example.com", "api.example.com:443:443", ph.as_str()),
+            ("api.example.com", "api.example.com:70000", ph.as_str()),
+            ("api.example.com", "api.example.com%2e:443", ph.as_str()),
+            ("api.example.com", " api.example.com:443", ph.as_str()),
+            ("xn--bcher-kva.example", "bücher.example:443", ph.as_str()),
+            ("bücher.example", "xn--bcher-kva.example:443", ph.as_str()),
+            ("2001:db8::1", "[2001:db8::1]:443", "Bearer REAL"),
+            ("[2001:db8::1]", "[2001:DB8::1]:443", "Bearer REAL"),
+            ("2001:db8::1", "[2001:0db8::1]:443", ph.as_str()),
+            // Unbracketed, the last group reads as a port: `2001:db8::`
+            // port 1, which is also where the proxy would connect.
+            ("2001:db8::1", "2001:db8::1", ph.as_str()),
+            ("203.0.113.7", "203.0.113.7:443", "Bearer REAL"),
+            ("203.0.113.7", "0xcb.0.113.7:443", ph.as_str()),
+            ("203.0.113.7", "3405803783:443", ph.as_str()),
+            ("203.0.113.7", "[::ffff:203.0.113.7]:443", ph.as_str()),
+        ] {
+            let (host, port) = split_host_port(authority, 443);
+            let target = Target {
+                port,
+                ..remote(&host)
+            };
+            let got = swapped(&table_bound_to(bound), &target, &auth_headers());
+            assert_eq!(got, expected, "bound={bound} authority={authority}");
+        }
+    }
+
+    /// Plain HTTP takes the host from an absolute-form target or the `Host`
+    /// header (`resolve_target`), and the request must name no other
+    /// (`names_only`); odd spellings there fail closed too.
+    #[test]
+    fn odd_spellings_in_a_plain_http_request_fail_closed() {
+        let ph = format!("Bearer {PLACEHOLDER}");
+        let table = table_with("api.example.com", true);
+        for (request_target, host_header, expected) in [
+            (
+                "http://API.example.com/v1",
+                "api.example.com",
+                "Bearer REAL",
+            ),
+            ("http://api.example.com", "api.example.com", "Bearer REAL"),
+            // Not stripped as absolute-form, so the Host header picks the
+            // host, and `names_only` checks the target names the same one.
+            (
+                "HTTP://api.example.com/v1",
+                "api.example.com",
+                "Bearer REAL",
+            ),
+            ("HTTP://evil.com/v1", "api.example.com", ph.as_str()),
+            (
+                "http://api.example.com./v1",
+                "api.example.com.",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com@evil.com/v1",
+                "evil.com",
+                ph.as_str(),
+            ),
+            (
+                "http://evil.com@api.example.com/v1",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com:80:80/v1",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com?@evil.com/",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            (
+                "http://api.example.com#@evil.com/",
+                "api.example.com",
+                ph.as_str(),
+            ),
+            ("http://api.example.com/v1", "evil.com", ph.as_str()),
+            ("/v1", "api.example.com.", ph.as_str()),
+            ("/v1", "api.example.com:80:80", ph.as_str()),
+            ("/v1", "api.example.com@evil.com", ph.as_str()),
+        ] {
+            let mut headers = vec![("Host".to_string(), host_header.to_string())];
+            headers.extend(auth_headers());
+            // As `handle_connection` and `forward` do.
+            let (host, port, path) = resolve_target(request_target, Some(host_header)).unwrap();
+            let target = Target {
+                port,
+                tls: false,
+                ..remote(&host)
+            };
+            if names_only(&headers, &path, target.host) {
+                substitute_placeholders(&mut headers, &target, &table);
+            }
+            assert_eq!(
+                headers[1].1, expected,
+                "target={request_target} host={host_header}"
+            );
         }
     }
 
@@ -1980,6 +2139,52 @@ mod tests {
             !child_saw.as_deref().unwrap_or("").contains("REAL"),
             "the child's [::1] listener got the key: {child_saw:?}"
         );
+    }
+
+    /// This machine's LAN address, where the child can listen on any port
+    /// too: the key goes only to the address and port a binding names, and
+    /// there without `allow_http`, as the request never leaves the machine.
+    #[test]
+    fn key_bound_to_this_machines_lan_address_needs_its_port() {
+        // The address a packet off this machine would leave from; nothing
+        // is sent.
+        let lan = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| s.connect("192.0.2.1:9").map(|_| s))
+            .and_then(|s| s.local_addr())
+            .map(|a| a.ip());
+        let Ok(lan) = lan.map(|ip| ip.to_string()) else {
+            eprintln!("no LAN address here; skipping");
+            return;
+        };
+        for with_port in [false, true] {
+            let listener = TcpListener::bind((lan.as_str(), 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, seen) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let _ = tx.send(echo_one(&mut s).ok());
+                }
+            });
+            let (table, expected) = if with_port {
+                (table_with(&format!("{lan}:{port}"), false), "REAL")
+            } else {
+                (table_with(&lan, true), PLACEHOLDER)
+            };
+            let (proxy, _mitm) = start(table, &[]);
+
+            let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+            let request = chunked_post()
+                .replacen("/v1", &format!("http://{lan}:{port}/v1"), 1)
+                .replacen("Host: localhost", &format!("Host: {lan}:{port}"), 1);
+            roundtrip(&mut tcp, &request);
+
+            let seen = seen.recv_timeout(Duration::from_secs(1)).ok().flatten();
+            let seen = seen.expect("the request reached the listener");
+            assert!(
+                seen.contains(&format!("Authorization: Bearer {expected}\r\n")),
+                "with_port={with_port}, listener on {lan}: {seen}"
+            );
+        }
     }
 
     #[test]

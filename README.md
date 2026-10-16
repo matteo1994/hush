@@ -61,13 +61,13 @@ The CA is generated when `hush run` starts and its private key only ever exists 
 
 ### Plain HTTP
 
-A plain-HTTP request to a bound host only gets the real value when the proxy's upstream connection is to a loopback address, such as a local dev server. Anywhere else the key would cross the network unencrypted, so the placeholder goes out verbatim instead. To allow that for a host you trust anyway, such as one on a private network, bind it with `--allow-http`.
+A plain-HTTP request to a bound host only gets the real value when the proxy's upstream connection is to this machine, such as a local dev server. Anywhere else the key would cross the network unencrypted, so the placeholder goes out verbatim instead. To allow that for a host you trust anyway, such as one on a private network, bind it with `--allow-http`.
 
 ### Ports
 
 `--host` can name a port, such as `--host api.example.com:8443`; the real value then goes only to that port. Without one, any port of the bound host will do.
 
-A server on your own machine needs its address and port, such as `--host 127.0.0.1:3000` or `--host '[::1]:3000'`, whichever it listens on. Any program there, including the agent, can listen on another port, or on the same port in the other address family: `localhost` means both `127.0.0.1` and `::1`. The key then only goes to that exact socket, whatever name the request uses, so clients can keep calling `localhost:3000`. `secret add` and `secret bind` refuse `localhost` or a loopback address without a port, and `hush run` warns about such a binding made before, which is never sent.
+A server on your own machine needs its address and port, such as `--host 127.0.0.1:3000` or `--host '[::1]:3000'`, whichever it listens on. Any program there, including the agent, can listen on another port, or on the same port in the other address family: `localhost` means both `127.0.0.1` and `::1`. The key then only goes to that exact socket, whatever name the request uses, so clients can keep calling `localhost:3000`. The same goes for the machine's other addresses, such as its LAN address: bind `192.168.1.5:3000`, not `192.168.1.5` or `mymac.local`, which hush never sends to once it finds the connection leads back to this machine. `secret add` and `secret bind` refuse `localhost` or a loopback address without a port, and `hush run` warns about such a binding made before, which is never sent.
 
 ## Usage
 
