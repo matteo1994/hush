@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.8 (2026-10-16)
+
+- Treat a server at this machine's LAN address like a local one. (#18)
+
 ## 0.1.7 (2026-10-16)
 
 - Send a key to a local server only at the address and port its binding names. (#17)
