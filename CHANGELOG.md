@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.7 (2026-10-16)
+
+- Send a key to a local server only at the address and port its binding names. (#17)
+
 ## 0.1.6 (2026-10-15)
 
 - Refuse requests whose length a server could read differently, so hush and the server always agree where a request ends. (#16)
