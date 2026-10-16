@@ -1152,6 +1152,8 @@ mod tests {
             ("2001:db8::1", "[2001:db8::1]:443", "Bearer REAL"),
             ("[2001:db8::1]", "[2001:DB8::1]:443", "Bearer REAL"),
             ("2001:db8::1", "[2001:0db8::1]:443", ph.as_str()),
+            // Unbracketed, the last group reads as a port: `2001:db8::`
+            // port 1, which is also where the proxy would connect.
             ("2001:db8::1", "2001:db8::1", ph.as_str()),
             ("203.0.113.7", "203.0.113.7:443", "Bearer REAL"),
             ("203.0.113.7", "0xcb.0.113.7:443", ph.as_str()),
@@ -2063,8 +2065,9 @@ mod tests {
         );
     }
 
-    /// This machine's LAN address, reached without going through loopback
-    /// addresses at all: the child can listen on any port of it too.
+    /// This machine's LAN address, where the child can listen on any port
+    /// too: the key goes only to the address and port a binding names, and
+    /// there without `allow_http`, as the request never leaves the machine.
     #[test]
     fn key_bound_to_this_machines_lan_address_needs_its_port() {
         // The address a packet off this machine would leave from; nothing
@@ -2077,28 +2080,35 @@ mod tests {
             eprintln!("no LAN address here; skipping");
             return;
         };
-        let childs_listener = TcpListener::bind((lan.as_str(), 0)).unwrap();
-        let port = childs_listener.local_addr().unwrap().port();
-        let (tx, childs) = std::sync::mpsc::channel();
-        thread::spawn(move || {
-            if let Ok((mut s, _)) = childs_listener.accept() {
-                let _ = tx.send(echo_one(&mut s).ok());
-            }
-        });
-        let (proxy, _mitm) = start(table_with(&lan, true), &[]);
+        for with_port in [false, true] {
+            let listener = TcpListener::bind((lan.as_str(), 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let (tx, seen) = std::sync::mpsc::channel();
+            thread::spawn(move || {
+                if let Ok((mut s, _)) = listener.accept() {
+                    let _ = tx.send(echo_one(&mut s).ok());
+                }
+            });
+            let (table, expected) = if with_port {
+                (table_with(&format!("{lan}:{port}"), false), "REAL")
+            } else {
+                (table_with(&lan, true), PLACEHOLDER)
+            };
+            let (proxy, _mitm) = start(table, &[]);
 
-        let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
-        let request = chunked_post()
-            .replacen("/v1", &format!("http://{lan}:{port}/v1"), 1)
-            .replacen("Host: localhost", &format!("Host: {lan}:{port}"), 1);
-        roundtrip(&mut tcp, &request);
+            let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+            let request = chunked_post()
+                .replacen("/v1", &format!("http://{lan}:{port}/v1"), 1)
+                .replacen("Host: localhost", &format!("Host: {lan}:{port}"), 1);
+            roundtrip(&mut tcp, &request);
 
-        let child_saw = childs.recv_timeout(Duration::from_secs(1)).ok().flatten();
-        let child_saw = child_saw.expect("the request reached the child's listener");
-        assert!(
-            child_saw.contains(&format!("Authorization: Bearer {PLACEHOLDER}\r\n")),
-            "the child's listener on {lan} got the key: {child_saw}"
-        );
+            let seen = seen.recv_timeout(Duration::from_secs(1)).ok().flatten();
+            let seen = seen.expect("the request reached the listener");
+            assert!(
+                seen.contains(&format!("Authorization: Bearer {expected}\r\n")),
+                "with_port={with_port}, listener on {lan}: {seen}"
+            );
+        }
     }
 
     #[test]
