@@ -1514,6 +1514,9 @@ mod tests {
         ] {
             assert!(framing_of(&pairs).is_err(), "{case}");
         }
+        // Like chunk-size errors, this one doesn't quote what it refused.
+        let err = framing_of(&[(cl, "sk-live-secret")]).unwrap_err();
+        assert!(!format!("{err:#}").contains("sk-live-secret"), "{err:#}");
     }
 
     /// A peer that never ends a chunk line can't make hush buffer it all.
