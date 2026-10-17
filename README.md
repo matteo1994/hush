@@ -59,6 +59,8 @@ The CA is generated when `hush run` starts and its private key only ever exists 
 
 `NODE_USE_ENV_PROXY=1` is also set, so Node 24.5+ honors the proxy variables.
 
+"The system trust store" is the platform's (the keychain on macOS, `/etc/ssl` and the like on Linux) unless `SSL_CERT_FILE` or `SSL_CERT_DIR` is set where you start `hush run`; then the certificates in those files replace it, for verifying upstreams and in `ca-bundle.pem`. That's how a corporate TLS-inspection CA reaches hush. It also means that whatever can set those variables for you, such as your shell's startup files, decides which servers hush accepts as a bound host. The same access can already capture the passphrase (see the threat model), so this is no new exposure.
+
 ### Plain HTTP
 
 A plain-HTTP request to a bound host only gets the real value when the proxy's upstream connection is to this machine, such as a local dev server. Anywhere else the key would cross the network unencrypted, so the placeholder goes out verbatim instead. To allow that for a host you trust anyway, such as one on a private network, bind it with `--allow-http`.
