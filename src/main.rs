@@ -13,6 +13,7 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
     if let Ok(v) = std::env::var(env_override) {
         return Ok(v);
     }
+    warn_if_inside_run();
     rpassword::prompt_password(prompt).map_err(|e| match e.raw_os_error() {
         Some(libc::ENXIO) => anyhow::anyhow!(
             "no terminal to prompt on for {}",
@@ -20,6 +21,22 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
         ),
         _ => e.into(),
     })
+}
+
+/// Before the first prompt inside `hush run`: a command there may have been
+/// started by an agent, which shares the terminal and can read what's typed
+/// into the prompt. That holds for every prompt, `secret ls` included, not
+/// only for vault changes.
+fn warn_if_inside_run() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if std::env::var_os(run::ACTIVE_VAR).is_some() {
+        WARNED.call_once(|| {
+            eprintln!(
+                "hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you."
+            );
+            eprintln!("hush: only enter the passphrase if you typed this command yourself.");
+        });
+    }
 }
 
 /// Asks a yes/no question on the terminal, defaulting to no. Like the
@@ -168,13 +185,6 @@ fn cmd_init() -> Result<ExitCode> {
 /// `hush run` can't rebind a secret to a host it controls. The change is
 /// printed before the prompt so you can see what you're approving.
 fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
-    if std::env::var_os(run::ACTIVE_VAR).is_some() && !matches!(action, SecretAction::Ls) {
-        eprintln!(
-            "hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you."
-        );
-        eprintln!("hush: only enter the passphrase if you typed this command yourself.");
-    }
-
     match action {
         SecretAction::Add {
             name,
