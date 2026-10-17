@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 
+use crate::harden;
 use crate::proxy::{ErrorLog, PlaceholderEntry, start_proxy};
 use crate::tls::{self, Mitm, TrustFiles};
 use crate::vault::{self, Vault};
@@ -168,12 +169,10 @@ fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
     let (program, args) = cmd
         .split_first()
         .expect("clap requires at least one cmd arg");
-    let mut child = Command::new(program)
-        .args(args)
-        .env_clear()
-        .envs(&env)
-        .spawn()
-        .with_context(|| format!("starting {program}"))?;
+    let mut cmd = Command::new(program);
+    cmd.args(args).env_clear().envs(&env);
+    harden::restore_for_child(&mut cmd);
+    let mut child = cmd.spawn().with_context(|| format!("starting {program}"))?;
 
     // Ctrl-C / Ctrl-\ go to the whole foreground process group. The child
     // decides what they mean (an interactive agent may just cancel a step);
