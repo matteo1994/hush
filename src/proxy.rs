@@ -450,7 +450,7 @@ fn request_framing(headers: &[(String, String)]) -> Result<Body> {
         bail!("request has conflicting Content-Length values");
     }
     if first.is_empty() || !first.bytes().all(|b| b.is_ascii_digit()) {
-        bail!("invalid Content-Length {first:?}");
+        bail!("invalid Content-Length");
     }
     Ok(Body::Length(
         first.parse().context("invalid Content-Length")?,
@@ -529,7 +529,8 @@ fn copy_body<R: BufRead, W: Write>(src: &mut R, dst: &mut W, body: Body) -> Resu
 }
 
 /// The size from a chunk-size line: hex digits only, then optional
-/// extensions, ended by CRLF.
+/// extensions, ended by CRLF. Errors don't quote the line: a bound server
+/// can echo the real value into it, and errors end up on the terminal.
 fn chunk_size(line: &str) -> Result<u64> {
     let Some(line) = line.strip_suffix("\r\n") else {
         bail!("chunk-size line not ended by CRLF");
@@ -540,9 +541,9 @@ fn chunk_size(line: &str) -> Result<u64> {
         .unwrap_or("")
         .trim_end_matches([' ', '\t']);
     if size.is_empty() || !size.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("invalid chunk size {size:?}");
+        bail!("invalid chunk size");
     }
-    u64::from_str_radix(size, 16).with_context(|| format!("chunk size {size:?} too large"))
+    u64::from_str_radix(size, 16).context("chunk size too large")
 }
 
 fn copy_exact<R: Read, W: Write>(src: &mut R, dst: &mut W, n: u64) -> Result<()> {
@@ -1427,6 +1428,24 @@ mod tests {
         assert!(summary.contains("\n  3× connecting to a:443: no route"));
         assert!(summary.contains("\n  1× error 0"));
         assert!(summary.ends_with("\n  2× other errors"), "{summary}");
+    }
+
+    #[test]
+    fn relay_errors_never_quote_what_the_server_sent() {
+        // A server that echoes the key where a chunk size belongs: one that
+        // isn't hex, and one that is but overflows.
+        for secret in ["sk-live-secret", "0123456789abcdef0123456789abcdef"] {
+            let wire = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{secret}\r\n");
+            let mut client = Vec::new();
+            let mut out = Scrubbed {
+                scrubber: Scrubber::new(vec![secret.to_string()]),
+                out: &mut client,
+            };
+            let err =
+                relay_response(&mut BufReader::new(wire.as_bytes()), &mut out, "GET").unwrap_err();
+            let message = format!("{err:#}");
+            assert!(!message.contains(secret), "{message}");
+        }
     }
 
     #[test]
