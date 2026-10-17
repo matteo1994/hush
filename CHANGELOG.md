@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.9 (2026-10-17)
+
+- Refuse a chunk line longer than 64 KiB instead of buffering it. (#19)
+
 ## 0.1.8 (2026-10-16)
 
 - Treat a server at this machine's LAN address like a local one. (#18)
