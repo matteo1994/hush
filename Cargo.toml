@@ -22,3 +22,7 @@ libc = "0.2"
 
 [dev-dependencies]
 x509-parser = "0.18"
+
+[lints.rust]
+# Set by cargo-fuzz; see fuzz/.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
