@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
 use hush::vault::Binding;
-use hush::{names, run, vault};
+use hush::{harden, names, run, vault};
 
 /// Reads a secret input interactively (hidden), or from an env var for
 /// scripting/testing — same escape hatch pattern as e.g. `murk --stdin`.
@@ -116,6 +116,7 @@ enum SecretAction {
 }
 
 fn main() -> ExitCode {
+    harden::process();
     let cli = Cli::parse();
     match dispatch(cli) {
         Ok(code) => code,
