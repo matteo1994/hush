@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.10 (2026-10-17)
+
+- Test that a key a server echoes back is redacted on every response path. (#20)
+
 ## 0.1.9 (2026-10-17)
 
 - Refuse a chunk line longer than 64 KiB instead of buffering it. (#19)
