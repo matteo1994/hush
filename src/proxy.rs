@@ -1444,6 +1444,7 @@ mod tests {
             let err =
                 relay_response(&mut BufReader::new(wire.as_bytes()), &mut out, "GET").unwrap_err();
             let message = format!("{err:#}");
+            assert!(message.contains("chunk size"), "{message}");
             assert!(!message.contains(secret), "{message}");
         }
     }
@@ -1516,7 +1517,9 @@ mod tests {
         }
         // Like chunk-size errors, this one doesn't quote what it refused.
         let err = framing_of(&[(cl, "sk-live-secret")]).unwrap_err();
-        assert!(!format!("{err:#}").contains("sk-live-secret"), "{err:#}");
+        let message = format!("{err:#}");
+        assert!(message.contains("Content-Length"), "{message}");
+        assert!(!message.contains("sk-live-secret"), "{message}");
     }
 
     /// A peer that never ends a chunk line can't make hush buffer it all.
