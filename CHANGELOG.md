@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.12 (2026-10-17)
+
+- Document that a key with permission to create keys can hand the agent a key hush can't redact. (#22)
+- Keep a hush run child from attaching a debugger to hush or making it dump core. (#23)
+
 ## 0.1.11 (2026-10-17)
 
 - Stop quoting a server's chunk-size line in errors printed after a run. (#21)
