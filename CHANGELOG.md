@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.11 (2026-10-17)
+
+- Stop quoting a server's chunk-size line in errors printed after a run. (#21)
+
 ## 0.1.10 (2026-10-17)
 
 - Test that a key a server echoes back is redacted on every response path. (#20)
