@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.13 (2026-10-17)
+
+- Document that an older copy of the vault brings back removed keys and bindings. (#24)
+- Warn before every passphrase prompt inside hush run, secret ls included. (#25)
+
 ## 0.1.12 (2026-10-17)
 
 - Document that a key with permission to create keys can hand the agent a key hush can't redact. (#22)
