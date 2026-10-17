@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.15 (2026-10-17)
+
+- Run CI tests on Linux only, since macOS minutes bill at 10x on a private repo. (#28)
+- Update age to 0.12, which drops its unmaintained proc-macro-error2 dependency. (#27)
+
 ## 0.1.14 (2026-10-17)
 
 - Update rustls to 0.23.46 and check dependencies for known advisories in CI. (#26)
