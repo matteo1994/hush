@@ -2313,6 +2313,96 @@ mod tests {
         }
     }
 
+    /// A server that answers one request with `response`, every `{auth}`
+    /// in it replaced by the `Authorization` value it received, sent a few
+    /// bytes at a time, then closes.
+    fn spawn_echoing(response: String) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut src = BufReader::new(s.try_clone().unwrap());
+            let Ok(Some(head)) = read_head(&mut src) else {
+                return;
+            };
+            let req = parse_head(&head).unwrap();
+            let auth = header_value(&req.headers, "authorization").unwrap_or("");
+            for piece in response.replace("{auth}", auth).as_bytes().chunks(7) {
+                if s.write_all(piece).is_err() {
+                    return;
+                }
+                let _ = s.flush();
+            }
+        });
+        port
+    }
+
+    /// Every way a response can reach the client goes through the Scrubber:
+    /// a server that echoes the swapped-in key back, in any part of any
+    /// response, only ever shows the client the marker.
+    #[test]
+    fn every_response_path_is_scrubbed() {
+        let big = "x".repeat(16 * 1024 - 5);
+        let big_body = format!("{big}{{auth}}");
+        let cases = [
+            ("headers", "GET", "HTTP/1.1 200 OK\r\nX-Echo: {auth}\r\nContent-Length: 0\r\n\r\n".to_string()),
+            (
+                "content-length body across the copy buffer",
+                "GET",
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{big_body}", big.len() + 11),
+            ),
+            (
+                "chunked body and trailer",
+                "GET",
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\n{auth}\r\n0\r\nX-Echo: {auth}\r\n\r\n".to_string(),
+            ),
+            (
+                "interim response",
+                "GET",
+                "HTTP/1.1 103 Early Hints\r\nX-Echo: {auth}\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{auth}".to_string(),
+            ),
+            (
+                "101 and what follows",
+                "GET",
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\nConnection: upgrade\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string(),
+            ),
+            ("close-delimited body", "GET", "HTTP/1.1 200 OK\r\n\r\n{auth}".to_string()),
+            ("HTTP/1.0 body", "GET", "HTTP/1.0 200 OK\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string()),
+            ("unparsable head", "GET", "HTTP/1.1 2x0 Odd\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string()),
+            (
+                "invalid content-length",
+                "GET",
+                "HTTP/1.1 200 OK\r\nContent-Length: eleven\r\n\r\n{auth}".to_string(),
+            ),
+            (
+                "HEAD answered with a body",
+                "HEAD",
+                "HTTP/1.1 200 OK\r\nX-Echo: {auth}\r\nContent-Length: 11\r\n\r\n{auth}".to_string(),
+            ),
+            (
+                "304 with a body",
+                "GET",
+                "HTTP/1.1 304 Not Modified\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string(),
+            ),
+        ];
+        for (name, method, response) in cases {
+            let port = spawn_echoing(response);
+            let (proxy, _mitm) = start(table_bound_to(&format!("127.0.0.1:{port}")), &[]);
+
+            let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+            let request = format!(
+                "{method} http://127.0.0.1:{port}/v1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\
+                 Authorization: Bearer {PLACEHOLDER}\r\n\r\n"
+            );
+            let resp = roundtrip(&mut tcp, &request);
+
+            assert!(!resp.contains("REAL"), "{name}: {resp}");
+            assert!(resp.contains("Bearer HUSH"), "{name}: no echo seen: {resp}");
+        }
+    }
+
     #[test]
     fn loopback_key_goes_to_the_port_its_binding_names() {
         let dev_server = spawn_upstream(false);
