@@ -38,8 +38,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # hush is Unix-only; macOS also covers the keychain-backed trust store.
-        os: [ubuntu-latest, macos-latest]
+        # hush is Unix-only. macOS (which also covers the keychain-backed
+        # trust store) is left out: it bills at 10x on a private repo, and the
+        # tests are run on a Mac locally. Add it back here once the repo is
+        # public and minutes are free.
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
