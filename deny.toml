@@ -1,0 +1,10 @@
+# `cargo deny check advisories`, run in CI. Only the advisories check is
+# used: licenses, bans and sources are left to review.
+
+[advisories]
+ignore = [
+    # proc-macro-error2 is unmaintained, with no safe upgrade. It is a
+    # build-time proc macro, reached through age's i18n-embed-fl, so none of
+    # its code runs in hush. Drop this once age moves off it.
+    { id = "RUSTSEC-2026-0173", reason = "build-time only, via age; no upgrade yet" },
+]

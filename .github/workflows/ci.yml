@@ -4,12 +4,18 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Weekly, so an advisory published against a locked dependency shows up
+  # without waiting for the next change.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # The event is part of the group, so a scheduled run on master never
+  # cancels a push run there, and with it a release.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -40,6 +46,20 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+
+  # Known advisories against Cargo.lock (RustSec), ignores in deny.toml.
+  # Not a prerequisite of bump: an advisory published against a dependency
+  # shouldn't hold back the release that updates it.
+  audit:
+    name: advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      - run: cargo deny --locked check advisories
 
   # Every merge to master that changes the program gets its own patch
   # version, a CHANGELOG.md entry and a `v<version>` tag, once lint and tests
