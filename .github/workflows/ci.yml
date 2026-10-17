@@ -38,8 +38,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # hush is Unix-only; macOS also covers the keychain-backed trust store.
-        os: [ubuntu-latest, macos-latest]
+        # Linux only: on a private repo macOS minutes bill at 10x. Run
+        # `cargo test` on a Mac before opening a PR that touches the macOS
+        # code (harden.rs, the keychain-backed trust store).
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
