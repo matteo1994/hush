@@ -111,6 +111,8 @@ hush run -- claude                          # a coding agent and everything it s
 
 **A bound host that echoes the key back**, such as a request-inspection endpoint like postman-echo or an error message that quotes it, is mostly covered. hush asks bound hosts for uncompressed responses (`Accept-Encoding: identity`) and replaces every real value in their response headers and body with a same-length `HUSH_REDACTED***` marker. That only catches the value as it was sent. A server that compresses anyway, escapes or re-encodes the key (base64, JSON `\u` escapes), echoes part of it, or splits it across chunk boundaries or responses still leaks it. Only bind hosts you trust with the key.
 
+**A key that gets another key.** hush keeps the child from reading the key, not from using it: every request the child sends to the bound host carries the real value, so the child can do anything the key allows there. With many vendor APIs that includes creating a new API key, exchanging the key for an OAuth or session token, or reading back a stored credential. The new credential comes back in an ordinary response, and the redaction above only knows the values in the vault, so the child gets it in full and can send it anywhere. Where the vendor offers one, bind a restricted key: limited to the endpoints the work needs, unable to create or manage keys, and with a spending or rate limit if there is one.
+
 **Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
 
 ## Building
