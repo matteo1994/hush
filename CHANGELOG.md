@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.16 (2026-10-18)
+
+- Pin a dated nightly in rust-toolchain.toml, so a new clippy lint can't fail CI without a code change. (#30)
+
 ## 0.1.15 (2026-10-17)
 
 - Run CI tests on Linux only, since macOS minutes bill at 10x on a private repo. (#28)
