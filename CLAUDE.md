@@ -13,7 +13,7 @@ cargo build                 # debug build
 cargo build --release
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test                  # proxy unit tests + in-process TLS end-to-end tests
+cargo test                  # unit tests, in-process TLS end-to-end tests, and tests/ driving the built binary
 cargo test <name>           # run a single test by name filter
 ```
 
@@ -25,7 +25,7 @@ Versioning: `hush --version` prints the `Cargo.toml` version plus the commit it 
 
 Toolchain is pinned to a dated nightly via `rust-toolchain.toml` (rustup), so a new clippy lint can't fail CI with no code change; move the date forward by hand, in a PR of its own that fixes whatever the newer clippy flags. Unix-only (`PermissionsExt`, `ExitStatusExt`, `libc` signals). Rust edition 2024.
 
-Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by every command that opens the vault) and `HUSH_SECRET_VALUE` (used by `secret add`). They operate on the real vault at `~/.config/hush/`, and there is no config-dir override, so point `HOME` at a throwaway directory such as `target/e2e`. `hush run` strips both variables from the child, so a nested `hush secret ...` inside it has to prompt, and fails with "no terminal" when there is none.
+`tests/run.rs` runs `hush run` end to end: a vault in a temp `HOME`, a child shell using curl through the proxy, and upstream servers on 127.0.0.1 that record what they receive. It covers the swap, Ctrl-C, exit codes and the run-dir sweep. Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by every command that opens the vault) and `HUSH_SECRET_VALUE` (used by `secret add`). They operate on the real vault at `~/.config/hush/`, and there is no config-dir override, so point `HOME` at a throwaway directory such as `target/e2e`. `hush run` strips both variables from the child, so a nested `hush secret ...` inside it has to prompt, and fails with "no terminal" when there is none.
 
 ## Architecture
 
