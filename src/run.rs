@@ -40,7 +40,7 @@ pub fn mint(vault: &Vault, names: &[String], env: Option<&str>) -> Minted {
         unusable_loopback: Vec::new(),
     };
     for name in names {
-        match vault.find_binding(name, env) {
+        match vault.find_binding(name, None, env) {
             Some((entry, binding)) => {
                 let placeholder = generate_placeholder();
                 let (host, port) = binding.host_and_port();

@@ -138,6 +138,9 @@ fn main() -> ExitCode {
     match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
+            // Only the outermost message, not the cause chain (`{e:#}`): a
+            // serde error quotes the vault value it rejected, and inside
+            // `hush run` an agent can read this terminal.
             eprintln!("hush: {e}");
             ExitCode::FAILURE
         }

@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
     pub host: String,
     #[serde(default)]
@@ -114,6 +115,7 @@ pub fn check_host(host: &str) -> Result<()> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SecretEntry {
     pub value: String,
     #[serde(default)]
@@ -136,24 +138,54 @@ impl SecretEntry {
     }
 }
 
+/// A named set of entries, so the same name (`OPENAI_API_KEY`, say) can hold
+/// a different key and endpoint per project.
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Vault {
+#[serde(deny_unknown_fields)]
+pub struct Profile {
     pub secrets: HashMap<String, SecretEntry>,
+}
+
+/// Every vault type refuses fields it doesn't know: a vault written by a
+/// newer hush must fail to load here rather than lose those fields on the
+/// next save. (hush 0.1.16 and earlier ignore them, so they drop profiles.)
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vault {
+    /// The unprofiled entries, used by every profile that doesn't have its
+    /// own entry for a name.
+    pub secrets: HashMap<String, SecretEntry>,
+    /// Left out when empty, so a vault without profiles is written exactly
+    /// as before profiles existed. A vault written before them has none.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub profiles: HashMap<String, Profile>,
 }
 
 impl Vault {
     pub fn new() -> Self {
-        Vault {
-            secrets: HashMap::new(),
-        }
+        Vault::default()
     }
 
+    /// `name`'s entry in `profile`, or else its unprofiled entry, so a key
+    /// every project shares needn't be copied into each profile.
+    pub fn entry(&self, name: &str, profile: Option<&str>) -> Option<&SecretEntry> {
+        profile
+            .and_then(|p| self.profiles.get(p))
+            .and_then(|p| p.secrets.get(name))
+            .or_else(|| self.secrets.get(name))
+    }
+
+    /// The binding for `env` in `name`'s entry (see `entry`). A profile's
+    /// entry replaces the unprofiled one whole: when it has no binding for
+    /// `env`, the unprofiled entry's bindings aren't tried, since they go
+    /// with a different value.
     pub fn find_binding<'a>(
         &'a self,
         name: &str,
+        profile: Option<&str>,
         env: Option<&str>,
     ) -> Option<(&'a SecretEntry, &'a Binding)> {
-        let entry = self.secrets.get(name)?;
+        let entry = self.entry(name, profile)?;
         // Prefer an exact env match, then fall back to an unscoped binding.
         let exact = entry
             .bindings
@@ -261,8 +293,8 @@ pub fn load_vault(passphrase: &str) -> Result<Vault> {
         .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupted vault"))?;
     reader.read_to_end(&mut decrypted)?;
 
-    let vault: Vault =
-        serde_json::from_slice(&decrypted).context("vault contents are not valid")?;
+    let vault: Vault = serde_json::from_slice(&decrypted)
+        .context("vault contents are not valid, or were written by a newer hush")?;
     Ok(vault)
 }
 
@@ -377,6 +409,134 @@ mod tests {
 
         let hosts: Vec<_> = entry.bindings.iter().map(|b| b.host.as_str()).collect();
         assert_eq!(hosts, ["api.example.com", "staging.example.com"]);
+    }
+
+    fn entry(value: &str, bindings: &[(&str, Option<&str>)]) -> SecretEntry {
+        SecretEntry {
+            value: value.into(),
+            bindings: bindings
+                .iter()
+                .map(|&(host, env)| {
+                    Binding::new(host.into(), env.map(Into::into), None, None, false)
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_vault_from_before_profiles_loads_and_is_written_the_same() {
+        let old = r#"{"secrets":{"OPENAI_API_KEY":{"value":"REAL","bindings":[{"host":"api.openai.com","env":null,"header":"Authorization","format":"Bearer {value}","allow_http":false}]}}}"#;
+        let vault: Vault = serde_json::from_str(old).unwrap();
+        assert!(vault.profiles.is_empty());
+        assert_eq!(vault.secrets["OPENAI_API_KEY"].value, "REAL");
+        assert_eq!(serde_json::to_string(&vault).unwrap(), old);
+    }
+
+    #[test]
+    fn a_vault_with_fields_this_hush_does_not_know_is_refused() {
+        for json in [
+            r#"{"secrets":{},"future":1}"#,
+            r#"{"secrets":{"K":{"value":"V","bindings":[],"future":1}}}"#,
+            r#"{"secrets":{"K":{"value":"V","bindings":[{"host":"h","future":1}]}}}"#,
+            r#"{"secrets":{},"profiles":{"p":{"secrets":{},"future":1}}}"#,
+        ] {
+            assert!(serde_json::from_str::<Vault>(json).is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn profiles_survive_a_save_and_load() {
+        let mut vault = Vault::new();
+        vault
+            .profiles
+            .entry("acme".into())
+            .or_default()
+            .secrets
+            .insert(
+                "OPENAI_API_KEY".into(),
+                entry("ACME", &[("acme.openai.azure.com", None)]),
+            );
+        let json = serde_json::to_vec(&vault).unwrap();
+        let back: Vault = serde_json::from_slice(&json).unwrap();
+        let acme = &back.profiles["acme"].secrets["OPENAI_API_KEY"];
+        assert_eq!(acme.value, "ACME");
+        assert_eq!(acme.bindings[0].host, "acme.openai.azure.com");
+    }
+
+    #[test]
+    fn a_profile_entry_wins_and_unprofiled_entries_fill_in() {
+        let mut vault = Vault::new();
+        vault.secrets.insert(
+            "OPENAI_API_KEY".into(),
+            entry(
+                "SHARED",
+                &[
+                    ("api.openai.com", None),
+                    ("staging.openai.com", Some("staging")),
+                ],
+            ),
+        );
+        vault.secrets.insert(
+            "GITHUB_KEY".into(),
+            entry("GH", &[("api.github.com", None)]),
+        );
+        vault
+            .profiles
+            .entry("acme".into())
+            .or_default()
+            .secrets
+            .insert(
+                "OPENAI_API_KEY".into(),
+                entry("ACME", &[("acme.openai.azure.com", None)]),
+            );
+        let found = |name, profile, env| {
+            vault
+                .find_binding(name, profile, env)
+                .map(|(e, b)| (e.value.as_str(), b.host.as_str()))
+        };
+
+        assert_eq!(
+            found("OPENAI_API_KEY", Some("acme"), None),
+            Some(("ACME", "acme.openai.azure.com"))
+        );
+        // A name the profile doesn't have, and a profile that doesn't exist.
+        assert_eq!(
+            found("GITHUB_KEY", Some("acme"), None),
+            Some(("GH", "api.github.com"))
+        );
+        assert_eq!(
+            found("OPENAI_API_KEY", Some("beta"), None),
+            Some(("SHARED", "api.openai.com"))
+        );
+        assert_eq!(
+            found("OPENAI_API_KEY", None, Some("staging")),
+            Some(("SHARED", "staging.openai.com"))
+        );
+        // The profile's entry has no staging binding, but its unscoped one
+        // still applies; the shared entry's staging binding goes with the
+        // shared value, so it isn't used for acme.
+        assert_eq!(
+            found("OPENAI_API_KEY", Some("acme"), Some("staging")),
+            Some(("ACME", "acme.openai.azure.com"))
+        );
+    }
+
+    #[test]
+    fn a_profile_entry_without_a_matching_binding_does_not_fall_back() {
+        let mut vault = Vault::new();
+        vault
+            .secrets
+            .insert("KEY".into(), entry("SHARED", &[("api.example.com", None)]));
+        vault
+            .profiles
+            .entry("acme".into())
+            .or_default()
+            .secrets
+            .insert(
+                "KEY".into(),
+                entry("ACME", &[("acme.example.com", Some("prod"))]),
+            );
+        assert!(vault.find_binding("KEY", Some("acme"), None).is_none());
     }
 
     #[test]
