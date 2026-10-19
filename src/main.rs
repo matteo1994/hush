@@ -77,6 +77,10 @@ enum Command {
     /// Run a command with managed secrets swapped in on the wire, never in its own env.
     /// Prompts for the passphrase when `.env` names any managed secret.
     Run {
+        /// Use this profile's entries, and the unprofiled ones for names it
+        /// doesn't have.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
         #[arg(long)]
         env: Option<String>,
         /// Also hand this secret to the command, on top of the project's
@@ -167,10 +171,16 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => cmd_init(),
         Command::Secret { action } => cmd_secret(action),
-        Command::Run { env, secrets, cmd } => {
+        Command::Run {
+            profile,
+            env,
+            secrets,
+            cmd,
+        } => {
+            profile_arg(profile.as_deref())?;
             let cwd = std::env::current_dir()?;
             let names = names::collect(&cwd, &vault::global_env_path()?, &secrets)?;
-            run::run(names, env, cmd, passphrase)
+            run::run(names, profile, env, cmd, passphrase)
         }
     }
 }
