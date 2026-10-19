@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.18 (2026-10-19)
+
+- Add --profile to secret add, bind, rm and ls, so a project can keep its own key under a shared name. (#33)
+
 ## 0.1.17 (2026-10-19)
 
 - Test hush run end to end with the built binary: the key swap, Ctrl-C, exit codes and the run-dir sweep. (#31)
