@@ -259,8 +259,8 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
         format!("acme: 1 entry\n  {} (no longer exists)\n", old.display())
     );
 
-    // From a subdirectory, the git root is what's mapped, and the old place
-    // goes with it.
+    // From a subdirectory, the git root is what's mapped. The old place is
+    // pointed out, not removed: an unmounted volume looks the same.
     let out = in_src(&["profile", "use", "acme"]);
     assert!(out.status.success(), "{out:?}");
     let err = stderr(&out);
@@ -269,15 +269,25 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
         "{err}"
     );
     assert!(
-        err.contains(&format!("dropping {}", old.display())),
+        err.contains(&format!(
+            "{}, also mapped to acme, no longer exists",
+            old.display()
+        )),
         "{err}"
     );
+    let again = in_src(&["profile", "use", "acme"]);
+    assert!(stderr(&again).contains("already mapped"), "{again:?}");
+
+    // A gone directory's mapping, removed by a relative path through a
+    // symlink: still the spelling it was stored under.
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&acme, &link).unwrap();
+    let out = home.hush_in(&link, &["profile", "use", "--none", "--dir", "../x/../old"]);
+    assert!(out.status.success(), "{out:?}");
     assert_eq!(
         home.ok(&["profile", "ls"]),
         format!("acme: 1 entry\n  {}\n", acme.display())
     );
-    let again = in_src(&["profile", "use", "acme"]);
-    assert!(stderr(&again).contains("already mapped"), "{again:?}");
 
     // --none removes it; a mapping above the directory isn't touched.
     let out = home.hush_in(&src, &["profile", "use", "--none", "--dir", "."]);
@@ -290,6 +300,19 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
     assert_eq!(home.ok(&["profile", "ls"]), "acme: 1 entry\n");
     let out = in_src(&["profile", "use", "--none"]);
     assert!(stderr(&out).contains("no profile is mapped to"), "{out:?}");
+
+    // Removing a profile's last entry keeps its mappings, and says so.
+    assert!(in_src(&["profile", "use", "acme"]).status.success());
+    let out = home.hush(&["secret", "rm", "KEY", "--profile", "acme"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(stderr(&out).contains("is still mapped to it"), "{out:?}");
+    assert_eq!(
+        home.ok(&["profile", "ls"]),
+        format!(
+            "acme: not in the vault, runs use the unprofiled entries\n  {}\n",
+            acme.display()
+        )
+    );
 
     // A name, or --none, but not both.
     assert!(!in_src(&["profile", "use"]).status.success());

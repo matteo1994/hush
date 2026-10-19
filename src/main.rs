@@ -338,6 +338,16 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             if v.remove(&name, profile).is_none() {
                 bail!("no such secret: {name}{}", in_profile(profile));
             }
+            // Kept, so adding a secret to the profile again brings them back.
+            if let Some(p) = profile
+                && !v.profiles.contains_key(p)
+            {
+                for (d, _) in v.directories.iter().filter(|(_, q)| *q == p) {
+                    eprintln!(
+                        "profile {p} is empty now and removed, but {d} is still mapped to it; runs there use the unprofiled entries"
+                    );
+                }
+            }
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Ls { profile } => {
@@ -401,6 +411,18 @@ fn cmd_profile(action: ProfileAction) -> Result<ExitCode> {
                             "no such profile: {p}; add a secret to it first with `hush secret add NAME --host HOST --profile {p}`"
                         );
                     }
+                    // Where the project was before it moved, perhaps. Not
+                    // removed here: a directory on an unmounted volume looks
+                    // just the same.
+                    for (d, _) in v
+                        .directories
+                        .iter()
+                        .filter(|(d, q)| *q == p && **d != dir && !Path::new(d).exists())
+                    {
+                        eprintln!(
+                            "{d}, also mapped to {p}, no longer exists; if it's gone for good, `hush profile use --none --dir {d}`"
+                        );
+                    }
                     match v.directories.insert(dir.clone(), p.to_string()) {
                         Some(old) if old == p => {
                             eprintln!("{dir} was already mapped to profile {p}");
@@ -409,14 +431,6 @@ fn cmd_profile(action: ProfileAction) -> Result<ExitCode> {
                         Some(old) => eprintln!("it was mapped to profile {old}"),
                         None => {}
                     }
-                    // Where the project was before it moved.
-                    v.directories.retain(|d, q| {
-                        let gone = q == p && !Path::new(d).exists();
-                        if gone {
-                            eprintln!("dropping {d}, also mapped to {p}, which no longer exists");
-                        }
-                        !gone
-                    });
                 }
                 None => {
                     if v.directories.remove(&dir).is_none() {
@@ -478,7 +492,7 @@ fn mapped_dir(dir: Option<&Path>, none: bool) -> Result<String> {
     let dir = match dir {
         Some(d) => match d.canonicalize() {
             Ok(d) => d,
-            Err(_) if none => cwd.join(d),
+            Err(_) if none => canonical_gone(&cwd.join(d)),
             Err(e) => return Err(e).with_context(|| format!("--dir {}", d.display())),
         },
         None => names::project_dir(&cwd).to_path_buf(),
@@ -489,6 +503,36 @@ fn mapped_dir(dir: Option<&Path>, none: bool) -> Result<String> {
             d.display()
         )
     })
+}
+
+/// A path that doesn't exist, spelled as it was stored when it did: `.` and
+/// `..` resolved, and its deepest existing ancestor canonicalized.
+fn canonical_gone(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut lexical = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            c => lexical.push(c),
+        }
+    }
+    let mut rest = Vec::new();
+    let mut base = lexical.as_path();
+    loop {
+        if let Ok(canonical) = base.canonicalize() {
+            return rest.into_iter().rev().fold(canonical, |p, c| p.join(c));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                base = parent;
+            }
+            _ => return lexical,
+        }
+    }
 }
 
 fn profile_arg(profile: Option<&str>) -> Result<Option<&str>> {
