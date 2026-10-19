@@ -109,6 +109,9 @@ enum SecretAction {
         /// asking first.
         #[arg(long)]
         force: bool,
+        /// Work on this profile's entries instead of the unprofiled ones.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Add another host binding to an existing secret.
     Bind {
@@ -125,11 +128,24 @@ enum SecretAction {
         /// value unencrypted. Off by default.
         #[arg(long)]
         allow_http: bool,
+        /// Work on this profile's entries instead of the unprofiled ones.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Remove a secret.
-    Rm { name: String },
-    /// List secret names and their bindings (never values).
-    Ls,
+    Rm {
+        name: String,
+        /// Work on this profile's entries instead of the unprofiled ones.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+    /// List secret names and their bindings (never values), and the profile
+    /// of each. With --profile, what a run with that profile gets: its own
+    /// entries and the unprofiled ones it doesn't replace.
+    Ls {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -197,7 +213,9 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             format,
             allow_http,
             force,
+            profile,
         } => {
+            let profile = profile_arg(profile.as_deref())?;
             vault::check_host(&host)?;
             let binding = Binding::new(host, env, header, format, allow_http);
             let replacing = if force {
@@ -205,11 +223,22 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             } else {
                 ""
             };
-            eprintln!("adding {name}{replacing}, bound to {}", describe(&binding));
+            eprintln!(
+                "adding {name}{}{replacing}, bound to {}",
+                in_profile(profile),
+                describe(&binding)
+            );
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
-            if let Some(existing) = v.secrets.get(&name)
+            if let Some(p) = profile
+                && v.secrets.contains_key(&name)
+            {
+                eprintln!(
+                    "runs with profile {p} will use this {name} instead of the unprofiled one"
+                );
+            }
+            if let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name))
                 && !force
             {
                 eprintln!("{name} already exists, bound to:");
@@ -224,7 +253,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 }
             }
             let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
-            v.secrets.insert(
+            v.secrets_in_or_new(profile).insert(
                 name,
                 vault::SecretEntry {
                     value,
@@ -240,44 +269,91 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             header,
             format,
             allow_http,
+            profile,
         } => {
+            let profile = profile_arg(profile.as_deref())?;
             vault::check_host(&host)?;
             let binding = Binding::new(host, env, header, format, allow_http);
-            eprintln!("binding {name} to {}", describe(&binding));
+            eprintln!(
+                "binding {name}{} to {}",
+                in_profile(profile),
+                describe(&binding)
+            );
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
-            let Some(entry) = v.secrets.get_mut(&name) else {
-                bail!("no such secret: {name}")
+            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
+                bail!("no such secret: {name}{}", in_profile(profile))
             };
             entry
                 .add_binding(binding)
                 .map_err(|e| anyhow!("{name} is {e}"))?;
             vault::save_vault(&v, &pass)?;
         }
-        SecretAction::Rm { name } => {
-            eprintln!("removing {name}");
+        SecretAction::Rm { name, profile } => {
+            let profile = profile_arg(profile.as_deref())?;
+            eprintln!("removing {name}{}", in_profile(profile));
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
-            if v.secrets.remove(&name).is_none() {
-                bail!("no such secret: {name}");
+            if v.remove(&name, profile).is_none() {
+                bail!("no such secret: {name}{}", in_profile(profile));
             }
             vault::save_vault(&v, &pass)?;
         }
-        SecretAction::Ls => {
+        SecretAction::Ls { profile } => {
+            let profile = profile_arg(profile.as_deref())?;
             let v = vault::load_vault(&passphrase()?)?;
-            let mut names: Vec<_> = v.secrets.keys().collect();
-            names.sort();
-            for name in names {
-                println!("{name}");
-                for b in &v.secrets[name].bindings {
+            // (profile, name), unprofiled first.
+            let mut listed: Vec<(Option<&str>, &str)> = match profile {
+                Some(p) => {
+                    let Some(own) = v.secrets_in(Some(p)) else {
+                        bail!("no such profile: {p}");
+                    };
+                    let shared = v.secrets.keys().filter(|n| !own.contains_key(*n));
+                    shared
+                        .map(|n| (None, n.as_str()))
+                        .chain(own.keys().map(|n| (Some(p), n.as_str())))
+                        .collect()
+                }
+                None => v
+                    .secrets
+                    .keys()
+                    .map(|n| (None, n.as_str()))
+                    .chain(v.profiles.iter().flat_map(|(p, profile)| {
+                        profile
+                            .secrets
+                            .keys()
+                            .map(|n| (Some(p.as_str()), n.as_str()))
+                    }))
+                    .collect(),
+            };
+            listed.sort();
+            for (p, name) in listed {
+                match p {
+                    Some(p) => println!("{name} (profile {p})"),
+                    None => println!("{name}"),
+                }
+                for b in &v.secrets_in(p).expect("listed from it")[name].bindings {
                     println!("  {}", describe(b));
                 }
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn profile_arg(profile: Option<&str>) -> Result<Option<&str>> {
+    if let Some(p) = profile {
+        vault::check_profile(p)?;
+    }
+    Ok(profile)
+}
+
+fn in_profile(profile: Option<&str>) -> String {
+    profile
+        .map(|p| format!(" in profile {p}"))
+        .unwrap_or_default()
 }
 
 fn describe(b: &Binding) -> String {

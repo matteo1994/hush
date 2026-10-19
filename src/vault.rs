@@ -195,6 +195,64 @@ impl Vault {
         let binding = exact.or(unscoped)?;
         Some((entry, binding))
     }
+
+    /// The entries `--profile` names, or the unprofiled ones without it.
+    /// `None` for a profile that doesn't exist.
+    pub fn secrets_in(&self, profile: Option<&str>) -> Option<&HashMap<String, SecretEntry>> {
+        match profile {
+            Some(p) => self.profiles.get(p).map(|p| &p.secrets),
+            None => Some(&self.secrets),
+        }
+    }
+
+    pub fn secrets_in_mut(
+        &mut self,
+        profile: Option<&str>,
+    ) -> Option<&mut HashMap<String, SecretEntry>> {
+        match profile {
+            Some(p) => self.profiles.get_mut(p).map(|p| &mut p.secrets),
+            None => Some(&mut self.secrets),
+        }
+    }
+
+    /// Like `secrets_in_mut`, creating the profile if it doesn't exist.
+    pub fn secrets_in_or_new(
+        &mut self,
+        profile: Option<&str>,
+    ) -> &mut HashMap<String, SecretEntry> {
+        match profile {
+            Some(p) => &mut self.profiles.entry(p.to_string()).or_default().secrets,
+            None => &mut self.secrets,
+        }
+    }
+
+    /// Removes `name` from `profile` (or the unprofiled entries), and the
+    /// profile with it once it holds nothing, so `ls` doesn't list it.
+    pub fn remove(&mut self, name: &str, profile: Option<&str>) -> Option<SecretEntry> {
+        let removed = self.secrets_in_mut(profile)?.remove(name);
+        if let Some(p) = profile
+            && self.profiles.get(p).is_some_and(|p| p.secrets.is_empty())
+        {
+            self.profiles.remove(p);
+        }
+        removed
+    }
+}
+
+/// Refuses a `--profile` name that would be awkward on a command line or in
+/// `secret ls` output: it starts with a letter or digit (not `-`, `.` or
+/// `..`), then letters, digits, `-`, `_` and `.`.
+pub fn check_profile(name: &str) -> Result<()> {
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!(
+            "--profile {name:?}: start with a letter or digit, then use letters, digits, '-', '_' and '.'"
+        );
+    }
+    Ok(())
 }
 
 pub fn config_dir() -> Result<PathBuf> {
