@@ -31,8 +31,9 @@ pub struct Minted {
 }
 
 /// Mints a fresh placeholder for each requested name that has a binding for
-/// `env`. Only these entries outlive the vault, which is dropped after this.
-pub fn mint(vault: &Vault, names: &[String], env: Option<&str>) -> Minted {
+/// `env`, in `profile`'s entry for the name or else its unprofiled one. Only
+/// these entries outlive the vault, which is dropped after this.
+pub fn mint(vault: &Vault, names: &[String], profile: Option<&str>, env: Option<&str>) -> Minted {
     let mut minted = Minted {
         table: HashMap::new(),
         placeholders: HashMap::new(),
@@ -40,7 +41,7 @@ pub fn mint(vault: &Vault, names: &[String], env: Option<&str>) -> Minted {
         unusable_loopback: Vec::new(),
     };
     for name in names {
-        match vault.find_binding(name, None, env) {
+        match vault.find_binding(name, profile, env) {
             Some((entry, binding)) => {
                 let placeholder = generate_placeholder();
                 let (host, port) = binding.host_and_port();
@@ -117,6 +118,7 @@ pub fn child_env(
 /// `cmd` exits; nothing outlives it.
 pub fn run(
     names: Vec<String>,
+    profile: Option<String>,
     env: Option<String>,
     cmd: Vec<String>,
     passphrase: impl FnOnce() -> Result<String>,
@@ -133,7 +135,16 @@ pub fn run(
 
     let minted = {
         let vault = vault::load_vault(&passphrase()?)?;
-        mint(&vault, &names, env.as_deref())
+        // A mistyped --profile would otherwise quietly run with the
+        // unprofiled entries.
+        if let Some(p) = &profile
+            && !vault.profiles.contains_key(p)
+        {
+            eprintln!(
+                "hush: warning: there is no profile {p} in the vault, using the unprofiled entries"
+            );
+        }
+        mint(&vault, &names, profile.as_deref(), env.as_deref())
     };
     for name in &minted.unmatched {
         eprintln!("hush: warning: {name} has no matching binding, not injected");
@@ -304,7 +315,7 @@ mod tests {
             );
         }
         let names = ["DEV_KEY".into(), "NAMED_KEY".into(), "PORTED_KEY".into()];
-        let m = mint(&v, &names, None);
+        let m = mint(&v, &names, None, None);
 
         assert_eq!(
             m.unusable_loopback,
@@ -322,6 +333,7 @@ mod tests {
         let m = mint(
             &vault(),
             &["BILLING_API_KEY".into(), "MISSING_KEY".into()],
+            None,
             None,
         );
 
@@ -347,7 +359,7 @@ mod tests {
 
     #[test]
     fn mint_selects_env_binding() {
-        let m = mint(&vault(), &["BILLING_API_KEY".into()], Some("staging"));
+        let m = mint(&vault(), &["BILLING_API_KEY".into()], None, Some("staging"));
         let entry = &m.table[&m.placeholders["BILLING_API_KEY"]];
         assert_eq!(
             (entry.host.as_str(), entry.header.as_str()),
@@ -356,11 +368,37 @@ mod tests {
     }
 
     #[test]
+    fn mint_takes_the_profile_entry_and_unprofiled_ones_for_the_rest() {
+        let mut v = vault();
+        v.profiles.entry("acme".into()).or_default().secrets.insert(
+            "BILLING_API_KEY".to_string(),
+            SecretEntry {
+                value: "ACME".to_string(),
+                bindings: vec![Binding::new(
+                    "acme.example.com".into(),
+                    None,
+                    None,
+                    None,
+                    false,
+                )],
+            },
+        );
+        let names = ["BILLING_API_KEY".into(), "UNUSED_KEY".into()];
+        let m = mint(&v, &names, Some("acme"), None);
+        let entry = |name: &str| {
+            let e = &m.table[&m.placeholders[name]];
+            (e.real_value.as_str(), e.host.as_str())
+        };
+        assert_eq!(entry("BILLING_API_KEY"), ("ACME", "acme.example.com"));
+        assert_eq!(entry("UNUSED_KEY"), ("OTHER", "other.example.com"));
+    }
+
+    #[test]
     fn placeholders_are_fresh_per_mint() {
         let names = ["BILLING_API_KEY".to_string()];
         assert_ne!(
-            mint(&vault(), &names, None).placeholders,
-            mint(&vault(), &names, None).placeholders
+            mint(&vault(), &names, None, None).placeholders,
+            mint(&vault(), &names, None, None).placeholders
         );
     }
 

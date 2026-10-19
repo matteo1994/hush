@@ -146,6 +146,61 @@ fn child_sees_placeholders_and_only_the_bound_host_gets_the_key() {
     );
 }
 
+/// With `--profile`, the profile's entry for a name is what reaches the
+/// bound host; a profile the vault doesn't have warns and falls back.
+#[test]
+fn a_run_with_a_profile_sends_the_profile_key() {
+    let (bound, rx) = upstream();
+    let home = Home::with_key("profile", bound);
+    let host = format!("127.0.0.1:{bound}");
+    let mut add = home.hush(&[
+        "secret",
+        "add",
+        "DEMO_KEY",
+        "--host",
+        &host,
+        "--profile",
+        "acme",
+    ]);
+    add.env("HUSH_SECRET_VALUE", "sk-acme-0123456789abcdef");
+    home.ok(add);
+
+    let run = |profile: &str| {
+        let script = format!(r#"{CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+        let mut cmd = home.hush(&[
+            "run",
+            "--profile",
+            profile,
+            "--secret",
+            "DEMO_KEY",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ]);
+        cmd.env("BOUND", bound.to_string());
+        let out = home.ok(cmd);
+        (received(&rx), String::from_utf8(out.stderr).unwrap())
+    };
+
+    let (at_bound, stderr) = run("acme");
+    assert!(
+        at_bound.contains("Bearer sk-acme-0123456789abcdef\r\n"),
+        "{at_bound}"
+    );
+    assert!(!stderr.contains("warning"), "{stderr}");
+
+    let (at_bound, stderr) = run("acmee");
+    assert!(
+        at_bound.contains(&format!("Bearer {REAL}\r\n")),
+        "{at_bound}"
+    );
+    assert!(
+        stderr.contains("there is no profile acmee in the vault"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn exit_codes_pass_through() {
     let home = Home::new("exit");
