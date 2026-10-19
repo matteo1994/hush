@@ -259,8 +259,25 @@ fn a_mapped_project_runs_with_its_profile() {
     );
     assert!(!stderr.contains("mapped to"), "{stderr}");
 
-    let moved = home.0.canonicalize().unwrap().join("moved");
+    // acme's last entry removed: the mapping stays, and falls back.
+    home.ok(home.hush(&["secret", "rm", "DEMO_KEY", "--profile", "acme"]));
+    let (at_bound, stderr) = run(&sub, &[]);
+    assert!(
+        at_bound.contains(&format!("Bearer {REAL}\r\n")),
+        "{at_bound}"
+    );
+    assert!(
+        stderr.contains("there is no profile acme in the vault"),
+        "{stderr}"
+    );
+
+    // Moved under the same name it's pointed out; elsewhere it isn't.
+    let elsewhere = home.0.canonicalize().unwrap().join("elsewhere");
+    let moved = elsewhere.join("project");
+    std::fs::create_dir(&elsewhere).unwrap();
     std::fs::rename(&project, &moved).unwrap();
+    let (_, stderr) = run(&elsewhere, &[]);
+    assert!(!stderr.contains("no longer exists"), "{stderr}");
     let (at_bound, stderr) = run(&moved, &[]);
     assert!(
         at_bound.contains(&format!("Bearer {REAL}\r\n")),

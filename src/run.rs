@@ -185,9 +185,12 @@ fn mapped_profile(vault: &Vault, cwd: &Path) -> Option<String> {
         eprintln!("hush: using profile {p}, mapped to {dir}");
         return Some(p.to_string());
     }
-    // A project that moved loses its mapping without a word otherwise.
+    // A project that moved loses its mapping without a word otherwise. Only
+    // directories named like this project: a moved one usually keeps its
+    // name, and the rest are in `hush profile ls`.
+    let name = crate::names::project_dir(cwd).file_name();
     for (dir, p) in &vault.directories {
-        if !Path::new(dir).exists() {
+        if Path::new(dir).file_name() == name && !Path::new(dir).exists() {
             eprintln!(
                 "hush: warning: {dir}, mapped to profile {p}, no longer exists; if that project moved here, run `hush profile use {p}`"
             );

@@ -251,6 +251,10 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
         "acme",
     ]);
 
+    std::fs::write(root.join("file"), "").unwrap();
+    let out = home.hush(&["profile", "use", "acme", "--dir", "file"]);
+    assert!(stderr(&out).contains("not a directory"), "{out:?}");
+
     // Where acme's project used to be, before it moved.
     home.ok(&["profile", "use", "acme", "--dir", "old"]);
     std::fs::remove_dir(&old).unwrap();

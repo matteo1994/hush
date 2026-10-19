@@ -491,7 +491,8 @@ fn mapped_dir(dir: Option<&Path>, none: bool) -> Result<String> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let dir = match dir {
         Some(d) => match d.canonicalize() {
-            Ok(d) => d,
+            Ok(c) if !none && !c.is_dir() => bail!("--dir {}: not a directory", d.display()),
+            Ok(c) => c,
             Err(_) if none => canonical_gone(&cwd.join(d)),
             Err(e) => return Err(e).with_context(|| format!("--dir {}", d.display())),
         },
