@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.17 (2026-10-19)
+
+- Test hush run end to end with the built binary: the key swap, Ctrl-C, exit codes and the run-dir sweep. (#31)
+- Store profiles in the vault, and refuse to load a vault written by a newer hush instead of dropping what it doesn't know. (#32)
+
 ## 0.1.16 (2026-10-18)
 
 - Pin a dated nightly in rust-toolchain.toml, so a new clippy lint can't fail CI without a code change. (#30)
