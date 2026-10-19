@@ -267,9 +267,13 @@ fn a_mapped_project_runs_with_its_profile() {
         "{at_bound}"
     );
     assert!(
-        stderr.contains("there is no profile acme in the vault"),
+        stderr.contains(&format!(
+            "{} is mapped to profile acme, which isn't in the vault",
+            project.display()
+        )),
         "{stderr}"
     );
+    assert!(!stderr.contains("using profile acme"), "{stderr}");
 
     // Moved under the same name it's pointed out; elsewhere it isn't.
     let elsewhere = home.0.canonicalize().unwrap().join("elsewhere");

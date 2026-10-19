@@ -252,8 +252,10 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
     ]);
 
     std::fs::write(root.join("file"), "").unwrap();
-    let out = home.hush(&["profile", "use", "acme", "--dir", "file"]);
-    assert!(stderr(&out).contains("not a directory"), "{out:?}");
+    for which in ["acme", "--none"] {
+        let out = home.hush(&["profile", "use", which, "--dir", "file"]);
+        assert!(stderr(&out).contains("not a directory"), "{which}: {out:?}");
+    }
 
     // Where acme's project used to be, before it moved.
     home.ok(&["profile", "use", "acme", "--dir", "old"]);
@@ -316,6 +318,26 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
             "acme: not in the vault, runs use the unprofiled entries\n  {}\n",
             acme.display()
         )
+    );
+
+    // Mapping it to another profile says which it replaces.
+    home.ok(&[
+        "secret",
+        "add",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--profile",
+        "beta",
+    ]);
+    let out = in_src(&["profile", "use", "beta"]);
+    assert!(
+        stderr(&out).contains("it was mapped to profile acme"),
+        "{out:?}"
+    );
+    assert!(
+        home.ok(&["profile", "ls"])
+            .ends_with(&format!("beta: 1 entry\n  {}\n", acme.display())),
     );
 
     // A name, or --none, but not both.

@@ -182,8 +182,16 @@ pub fn run(
 /// above it, said aloud since nothing on the command line shows it.
 fn mapped_profile(vault: &Vault, cwd: &Path) -> Option<String> {
     if let Some((dir, p)) = vault.mapped_profile(cwd) {
-        eprintln!("hush: using profile {p}, mapped to {dir}");
-        return Some(p.to_string());
+        if vault.profiles.contains_key(p) {
+            eprintln!("hush: using profile {p}, mapped to {dir}");
+            return Some(p.to_string());
+        }
+        // Its last entry was removed since; the mapping is kept for when
+        // the profile gets entries again.
+        eprintln!(
+            "hush: warning: {dir} is mapped to profile {p}, which isn't in the vault, using the unprofiled entries"
+        );
+        return None;
     }
     // A project that moved loses its mapping without a word otherwise. Only
     // directories named like this project: a moved one usually keeps its
