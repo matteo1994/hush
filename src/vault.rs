@@ -240,14 +240,17 @@ impl Vault {
 }
 
 /// Refuses a `--profile` name that would be awkward on a command line or in
-/// `secret ls` output.
+/// `secret ls` output: it starts with a letter or digit (not `-`, `.` or
+/// `..`), then letters, digits, `-`, `_` and `.`.
 pub fn check_profile(name: &str) -> Result<()> {
-    if name.is_empty()
+    if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
-        bail!("--profile {name:?}: use letters, digits, '-', '_' and '.'");
+        bail!(
+            "--profile {name:?}: start with a letter or digit, then use letters, digits, '-', '_' and '.'"
+        );
     }
     Ok(())
 }

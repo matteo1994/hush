@@ -1,6 +1,7 @@
 //! `hush secret` with `--profile`, through the built binary and a vault in a
 //! throwaway home.
 
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -16,9 +17,18 @@ impl Home {
         home
     }
 
+    /// Detached from any terminal, so a confirmation fails at once instead
+    /// of waiting on the terminal `cargo test` runs in.
     fn hush(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_hush"))
-            .args(args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hush"));
+        // SAFETY: setsid is async-signal-safe.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        cmd.args(args)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("HOME", &self.0)
@@ -153,8 +163,58 @@ fn profile_commands_touch_only_their_profile() {
 #[test]
 fn bad_profile_names_are_refused() {
     let home = Home::new("names");
-    for bad in ["", "a b", "a/b", "ü"] {
-        let err = home.fails(&["secret", "ls", "--profile", bad]);
-        assert!(err.contains("--profile"), "{bad:?}: {err}");
+    for bad in ["", "a b", "a/b", "ü", ".", "..", ".acme", "-acme", "_acme"] {
+        let err = home.fails(&["secret", "ls", &format!("--profile={bad}")]);
+        assert!(
+            err.contains("start with a letter or digit"),
+            "{bad:?}: {err}"
+        );
     }
+    for good in ["acme", "acme.prod", "2026-q4", "a_b"] {
+        let err = home.fails(&["secret", "ls", "--profile", good]);
+        assert!(err.contains("no such profile"), "{good:?}: {err}");
+    }
+}
+
+#[test]
+fn replacing_an_entry_in_a_profile_asks_and_rm_keeps_a_profile_that_has_more() {
+    let home = Home::new("replace");
+    let add = |host: &str, extra: &[&str]| {
+        let mut args = vec!["secret", "add", "KEY", "--host", host, "--profile", "acme"];
+        args.extend_from_slice(extra);
+        home.hush(&args)
+    };
+    assert!(add("old.example.com", &[]).status.success());
+    home.ok(&[
+        "secret",
+        "add",
+        "OTHER_KEY",
+        "--host",
+        "api.example.com",
+        "--profile",
+        "acme",
+    ]);
+
+    // There's no terminal to ask on, so without --force it refuses.
+    let out = add("new.example.com", &[]);
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("KEY already exists, bound to:"), "{stderr}");
+    assert!(stderr.contains("pass --force"), "{stderr}");
+    assert!(home.ok(&["secret", "ls"]).contains("host=old.example.com"));
+
+    assert!(add("new.example.com", &["--force"]).status.success());
+    let all = home.ok(&["secret", "ls"]);
+    assert!(
+        all.contains("host=new.example.com") && !all.contains("host=old.example.com"),
+        "{all}"
+    );
+
+    home.ok(&["secret", "rm", "KEY", "--profile", "acme"]);
+    let acme = home.ok(&["secret", "ls", "--profile", "acme"]);
+    assert_eq!(
+        acme.lines().next(),
+        Some("OTHER_KEY (profile acme)"),
+        "{acme}"
+    );
 }
