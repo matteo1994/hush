@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -159,6 +159,11 @@ pub struct Vault {
     /// as before profiles existed. A vault written before them has none.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub profiles: HashMap<String, Profile>,
+    /// Project directory → the profile runs started in it use (`hush profile
+    /// use`). Kept in the vault rather than the project, so changing which
+    /// profile a project gets takes the passphrase, like any other change.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub directories: BTreeMap<String, String>,
 }
 
 impl Vault {
@@ -236,6 +241,16 @@ impl Vault {
             self.profiles.remove(p);
         }
         removed
+    }
+
+    /// The mapped directory nearest `dir` (itself or an ancestor), and its
+    /// profile. `dir` must be canonical, as the mapped ones are.
+    pub fn mapped_profile(&self, dir: &Path) -> Option<(&str, &str)> {
+        dir.ancestors().find_map(|d| {
+            self.directories
+                .get_key_value(d.to_str()?)
+                .map(|(d, p)| (d.as_str(), p.as_str()))
+        })
     }
 }
 
@@ -595,6 +610,29 @@ mod tests {
                 entry("ACME", &[("acme.example.com", Some("prod"))]),
             );
         assert!(vault.find_binding("KEY", Some("acme"), None).is_none());
+    }
+
+    #[test]
+    fn the_nearest_mapped_directory_gives_the_profile() {
+        let mut vault = Vault::new();
+        vault.directories.insert("/w/acme".into(), "acme".into());
+        vault
+            .directories
+            .insert("/w/acme/vendor/x".into(), "x".into());
+        let mapped = |dir: &str| vault.mapped_profile(Path::new(dir));
+        assert_eq!(mapped("/w/acme"), Some(("/w/acme", "acme")));
+        assert_eq!(mapped("/w/acme/src/lib"), Some(("/w/acme", "acme")));
+        assert_eq!(
+            mapped("/w/acme/vendor/x/y"),
+            Some(("/w/acme/vendor/x", "x"))
+        );
+        // Whole path components only.
+        assert_eq!(mapped("/w/acme-old"), None);
+        assert_eq!(mapped("/w"), None);
+
+        let json = serde_json::to_vec(&vault).unwrap();
+        let back: Vault = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.directories, vault.directories);
     }
 
     #[test]

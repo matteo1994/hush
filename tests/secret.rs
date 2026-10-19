@@ -2,7 +2,7 @@
 //! throwaway home.
 
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 struct Home(PathBuf);
@@ -20,6 +20,10 @@ impl Home {
     /// Detached from any terminal, so a confirmation fails at once instead
     /// of waiting on the terminal `cargo test` runs in.
     fn hush(&self, args: &[&str]) -> Output {
+        self.hush_in(&self.0, args)
+    }
+
+    fn hush_in(&self, dir: &Path, args: &[&str]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hush"));
         // SAFETY: setsid is async-signal-safe.
         unsafe {
@@ -29,6 +33,7 @@ impl Home {
             });
         }
         cmd.args(args)
+            .current_dir(dir)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("HOME", &self.0)
@@ -216,5 +221,81 @@ fn replacing_an_entry_in_a_profile_asks_and_rm_keeps_a_profile_that_has_more() {
         acme.lines().next(),
         Some("OTHER_KEY (profile acme)"),
         "{acme}"
+    );
+}
+
+#[test]
+fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
+    let home = Home::new("use");
+    let root = home.0.canonicalize().unwrap();
+    let acme = root.join("acme");
+    let src = acme.join("src");
+    let old = root.join("old");
+    for dir in [&acme.join(".git"), &src, &old] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let in_src = |args: &[&str]| home.hush_in(&src, args);
+    let stderr = |out: &Output| String::from_utf8_lossy(&out.stderr).into_owned();
+
+    // Only a profile that holds something can be mapped.
+    let out = in_src(&["profile", "use", "acme"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("no such profile: acme"), "{out:?}");
+    home.ok(&[
+        "secret",
+        "add",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--profile",
+        "acme",
+    ]);
+
+    // Where acme's project used to be, before it moved.
+    home.ok(&["profile", "use", "acme", "--dir", "old"]);
+    std::fs::remove_dir(&old).unwrap();
+    assert_eq!(
+        home.ok(&["profile", "ls"]),
+        format!("acme: 1 entry\n  {} (no longer exists)\n", old.display())
+    );
+
+    // From a subdirectory, the git root is what's mapped, and the old place
+    // goes with it.
+    let out = in_src(&["profile", "use", "acme"]);
+    assert!(out.status.success(), "{out:?}");
+    let err = stderr(&out);
+    assert!(
+        err.contains(&format!("mapping {} to profile acme", acme.display())),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!("dropping {}", old.display())),
+        "{err}"
+    );
+    assert_eq!(
+        home.ok(&["profile", "ls"]),
+        format!("acme: 1 entry\n  {}\n", acme.display())
+    );
+    let again = in_src(&["profile", "use", "acme"]);
+    assert!(stderr(&again).contains("already mapped"), "{again:?}");
+
+    // --none removes it; a mapping above the directory isn't touched.
+    let out = home.hush_in(&src, &["profile", "use", "--none", "--dir", "."]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("runs there use profile acme"),
+        "{out:?}"
+    );
+    assert!(in_src(&["profile", "use", "--none"]).status.success());
+    assert_eq!(home.ok(&["profile", "ls"]), "acme: 1 entry\n");
+    let out = in_src(&["profile", "use", "--none"]);
+    assert!(stderr(&out).contains("no profile is mapped to"), "{out:?}");
+
+    // A name, or --none, but not both.
+    assert!(!in_src(&["profile", "use"]).status.success());
+    assert!(
+        !in_src(&["profile", "use", "acme", "--none"])
+            .status
+            .success()
     );
 }

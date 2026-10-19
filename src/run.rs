@@ -119,6 +119,7 @@ pub fn child_env(
 pub fn run(
     names: Vec<String>,
     profile: Option<String>,
+    cwd: &Path,
     env: Option<String>,
     cmd: Vec<String>,
     passphrase: impl FnOnce() -> Result<String>,
@@ -135,8 +136,9 @@ pub fn run(
 
     let minted = {
         let vault = vault::load_vault(&passphrase()?)?;
-        // A mistyped --profile would otherwise quietly run with the
-        // unprofiled entries.
+        let profile = profile.or_else(|| mapped_profile(&vault, cwd));
+        // A mistyped --profile, or a mapped profile whose last entry was
+        // removed, would otherwise quietly run with the unprofiled entries.
         if let Some(p) = &profile
             && !vault.profiles.contains_key(p)
         {
@@ -174,6 +176,24 @@ pub fn run(
         eprintln!("hush: {summary}");
     }
     code
+}
+
+/// The profile `hush profile use` mapped to `cwd` or the nearest directory
+/// above it, said aloud since nothing on the command line shows it.
+fn mapped_profile(vault: &Vault, cwd: &Path) -> Option<String> {
+    if let Some((dir, p)) = vault.mapped_profile(cwd) {
+        eprintln!("hush: using profile {p}, mapped to {dir}");
+        return Some(p.to_string());
+    }
+    // A project that moved loses its mapping without a word otherwise.
+    for (dir, p) in &vault.directories {
+        if !Path::new(dir).exists() {
+            eprintln!(
+                "hush: warning: {dir}, mapped to profile {p}, no longer exists; if that project moved here, run `hush profile use {p}`"
+            );
+        }
+    }
+    None
 }
 
 fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
