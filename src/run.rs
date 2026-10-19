@@ -393,6 +393,47 @@ mod tests {
         assert_eq!(entry("UNUSED_KEY"), ("OTHER", "other.example.com"));
     }
 
+    /// `--env` picks the binding inside the profile's entry. The unprofiled
+    /// entry's staging binding goes with its own value, so it is never used
+    /// for the profile's.
+    #[test]
+    fn mint_with_a_profile_and_env_picks_within_the_profile_entry() {
+        let mut v = vault();
+        let acme = v.profiles.entry("acme".into()).or_default();
+        acme.secrets.insert(
+            "BILLING_API_KEY".to_string(),
+            SecretEntry {
+                value: "ACME".to_string(),
+                bindings: vec![
+                    Binding::new("acme.example.com".into(), None, None, None, false),
+                    Binding::new(
+                        "qa.acme.example.com".into(),
+                        Some("qa".into()),
+                        None,
+                        None,
+                        false,
+                    ),
+                ],
+            },
+        );
+        let names = ["BILLING_API_KEY".to_string()];
+        let host = |env| {
+            let m = mint(&v, &names, Some("acme"), env);
+            let e = &m.table[&m.placeholders["BILLING_API_KEY"]];
+            (e.real_value.clone(), e.host.clone())
+        };
+        assert_eq!(
+            host(Some("qa")),
+            ("ACME".into(), "qa.acme.example.com".into())
+        );
+        // No staging binding in acme's entry: its unscoped one, not the
+        // unprofiled entry's staging.example.com.
+        assert_eq!(
+            host(Some("staging")),
+            ("ACME".into(), "acme.example.com".into())
+        );
+    }
+
     #[test]
     fn placeholders_are_fresh_per_mint() {
         let names = ["BILLING_API_KEY".to_string()];
