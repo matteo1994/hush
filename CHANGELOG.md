@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.19 (2026-10-19)
+
+- Add --profile to run, profiles keys, unprofiled if nothing (#34)
+
 ## 0.1.18 (2026-10-19)
 
 - Add --profile to secret add, bind, rm and ls, so a project can keep its own key under a shared name. (#33)
