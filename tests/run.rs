@@ -201,6 +201,101 @@ fn a_run_with_a_profile_sends_the_profile_key() {
     );
 }
 
+/// A project mapped with `hush profile use` gets its profile from any
+/// directory inside it, `--profile` overrides that, and a mapped project that
+/// moved gets the unprofiled entries and a warning.
+#[test]
+fn a_mapped_project_runs_with_its_profile() {
+    let (bound, rx) = upstream();
+    let home = Home::with_key("mapped", bound);
+    let host = format!("127.0.0.1:{bound}");
+    let mut add = home.hush(&[
+        "secret",
+        "add",
+        "DEMO_KEY",
+        "--host",
+        &host,
+        "--profile",
+        "acme",
+    ]);
+    add.env("HUSH_SECRET_VALUE", "sk-acme-0123456789abcdef");
+    home.ok(add);
+    let project = home.0.canonicalize().unwrap().join("project");
+    let sub = project.join("sub");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    let mut map = home.hush(&["profile", "use", "acme"]);
+    map.current_dir(&sub);
+    home.ok(map);
+
+    let run = |dir: &Path, flags: &[&str]| {
+        let script = format!(r#"{CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+        let mut args = vec!["run"];
+        args.extend_from_slice(flags);
+        args.extend(["--secret", "DEMO_KEY", "--", "sh", "-c", &script]);
+        let mut cmd = home.hush(&args);
+        cmd.current_dir(dir).env("BOUND", bound.to_string());
+        let out = home.ok(cmd);
+        (received(&rx), String::from_utf8(out.stderr).unwrap())
+    };
+
+    let (at_bound, stderr) = run(&sub, &[]);
+    assert!(
+        at_bound.contains("Bearer sk-acme-0123456789abcdef\r\n"),
+        "{at_bound}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "using profile acme, mapped to {}",
+            project.display()
+        )),
+        "{stderr}"
+    );
+
+    let (at_bound, stderr) = run(&sub, &["--profile", "beta"]);
+    assert!(
+        at_bound.contains(&format!("Bearer {REAL}\r\n")),
+        "{at_bound}"
+    );
+    assert!(!stderr.contains("mapped to"), "{stderr}");
+
+    // acme's last entry removed: the mapping stays, and falls back.
+    home.ok(home.hush(&["secret", "rm", "DEMO_KEY", "--profile", "acme"]));
+    let (at_bound, stderr) = run(&sub, &[]);
+    assert!(
+        at_bound.contains(&format!("Bearer {REAL}\r\n")),
+        "{at_bound}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "{} is mapped to profile acme, which isn't in the vault",
+            project.display()
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("using profile acme"), "{stderr}");
+
+    // Moved under the same name it's pointed out; elsewhere it isn't.
+    let elsewhere = home.0.canonicalize().unwrap().join("elsewhere");
+    let moved = elsewhere.join("project");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::rename(&project, &moved).unwrap();
+    let (_, stderr) = run(&elsewhere, &[]);
+    assert!(!stderr.contains("no longer exists"), "{stderr}");
+    let (at_bound, stderr) = run(&moved, &[]);
+    assert!(
+        at_bound.contains(&format!("Bearer {REAL}\r\n")),
+        "{at_bound}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "{}, mapped to profile acme, no longer exists",
+            project.display()
+        )),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn exit_codes_pass_through() {
     let home = Home::new("exit");

@@ -40,10 +40,7 @@ fn read(path: &Path) -> Result<String> {
 /// `start` itself is checked, so an unrelated `.env` in some parent
 /// directory is never picked up.
 pub fn find_project_dotenv(start: &Path) -> Option<PathBuf> {
-    let stop = start
-        .ancestors()
-        .find(|dir| dir.join(".git").exists())
-        .unwrap_or(start);
+    let stop = project_dir(start);
     for dir in start.ancestors() {
         let candidate = dir.join(".env");
         if candidate.is_file() {
@@ -54,6 +51,15 @@ pub fn find_project_dotenv(start: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The project `start` is in: the nearest directory holding `.git`, or
+/// `start` itself outside a git repo.
+pub fn project_dir(start: &Path) -> &Path {
+    start
+        .ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .unwrap_or(start)
 }
 
 /// `_KEY`-suffixed names from a project `.env`. Values are ignored

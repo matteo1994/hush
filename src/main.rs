@@ -1,7 +1,8 @@
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
 use hush::vault::Binding;
@@ -74,11 +75,17 @@ enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Choose which profile `hush run` uses in a project.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
     /// Run a command with managed secrets swapped in on the wire, never in its own env.
     /// Prompts for the passphrase when `.env` names any managed secret.
     Run {
         /// Use this profile's entries, and the unprofiled ones for names it
-        /// doesn't have.
+        /// doesn't have. Overrides the profile `hush profile use` mapped to
+        /// this project.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
         #[arg(long)]
@@ -152,6 +159,26 @@ enum SecretAction {
     },
 }
 
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Make `hush run` in this project (its git root, else this directory)
+    /// use profile NAME.
+    Use {
+        #[arg(required_unless_present = "none", conflicts_with = "none")]
+        name: Option<String>,
+        /// Remove the mapping instead, so runs there use the unprofiled entries.
+        #[arg(long)]
+        none: bool,
+        /// Map this directory rather than the current project, or with
+        /// --none, remove its mapping (it needn't exist any more).
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+    /// List profiles, how many entries each holds and the directories
+    /// mapped to it.
+    Ls,
+}
+
 fn main() -> ExitCode {
     harden::process();
     let cli = Cli::parse();
@@ -171,6 +198,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => cmd_init(),
         Command::Secret { action } => cmd_secret(action),
+        Command::Profile { action } => cmd_profile(action),
         Command::Run {
             profile,
             env,
@@ -178,9 +206,10 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             cmd,
         } => {
             profile_arg(profile.as_deref())?;
-            let cwd = std::env::current_dir()?;
+            // Canonical, as the directories `hush profile use` maps are.
+            let cwd = std::env::current_dir()?.canonicalize()?;
             let names = names::collect(&cwd, &vault::global_env_path()?, &secrets)?;
-            run::run(names, profile, env, cmd, passphrase)
+            run::run(names, profile, &cwd, env, cmd, passphrase)
         }
     }
 }
@@ -309,6 +338,16 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             if v.remove(&name, profile).is_none() {
                 bail!("no such secret: {name}{}", in_profile(profile));
             }
+            // Kept, so adding a secret to the profile again brings them back.
+            if let Some(p) = profile
+                && !v.profiles.contains_key(p)
+            {
+                for (d, _) in v.directories.iter().filter(|(_, q)| *q == p) {
+                    eprintln!(
+                        "profile {p} is empty now and removed, but {d} is still mapped to it; runs there use the unprofiled entries"
+                    );
+                }
+            }
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Ls { profile } => {
@@ -351,6 +390,150 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn cmd_profile(action: ProfileAction) -> Result<ExitCode> {
+    match action {
+        ProfileAction::Use { name, none, dir } => {
+            let name = profile_arg(name.as_deref())?;
+            let dir = mapped_dir(dir.as_deref(), none)?;
+            match name {
+                Some(p) => eprintln!("mapping {dir} to profile {p}"),
+                None => eprintln!("removing the profile mapping of {dir}"),
+            }
+            let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
+            let mut v = vault::load_vault(&pass)?;
+            match name {
+                Some(p) => {
+                    if !v.profiles.contains_key(p) {
+                        bail!(
+                            "no such profile: {p}; add a secret to it first with `hush secret add NAME --host HOST --profile {p}`"
+                        );
+                    }
+                    // Where the project was before it moved, perhaps. Not
+                    // removed here: a directory on an unmounted volume looks
+                    // just the same.
+                    for (d, _) in v
+                        .directories
+                        .iter()
+                        .filter(|(d, q)| *q == p && **d != dir && !Path::new(d).exists())
+                    {
+                        eprintln!(
+                            "{d}, also mapped to {p}, no longer exists; if it's gone for good, `hush profile use --none --dir {d}`"
+                        );
+                    }
+                    match v.directories.insert(dir.clone(), p.to_string()) {
+                        Some(old) if old == p => {
+                            eprintln!("{dir} was already mapped to profile {p}");
+                            return Ok(ExitCode::SUCCESS);
+                        }
+                        Some(old) => eprintln!("it was mapped to profile {old}"),
+                        None => {}
+                    }
+                }
+                None => {
+                    if v.directories.remove(&dir).is_none() {
+                        match v.mapped_profile(Path::new(&dir)) {
+                            Some((above, p)) => bail!(
+                                "no profile is mapped to {dir} itself; runs there use profile {p}, mapped to {above}"
+                            ),
+                            None => bail!("no profile is mapped to {dir}"),
+                        }
+                    }
+                }
+            }
+            vault::save_vault(&v, &pass)?;
+        }
+        ProfileAction::Ls => {
+            let v = vault::load_vault(&passphrase()?)?;
+            let mut names: Vec<&str> = v
+                .profiles
+                .keys()
+                .chain(v.directories.values())
+                .map(String::as_str)
+                .collect();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                eprintln!(
+                    "no profiles; add a secret to one with `hush secret add NAME --host HOST --profile PROFILE`"
+                );
+            }
+            for p in names {
+                match v.profiles.get(p).map(|p| p.secrets.len()) {
+                    Some(1) => println!("{p}: 1 entry"),
+                    Some(n) => println!("{p}: {n} entries"),
+                    None => println!("{p}: not in the vault, runs use the unprofiled entries"),
+                }
+                for dir in v
+                    .directories
+                    .iter()
+                    .filter(|(_, q)| *q == p)
+                    .map(|(d, _)| d)
+                {
+                    if Path::new(dir).exists() {
+                        println!("  {dir}");
+                    } else {
+                        println!("  {dir} (no longer exists)");
+                    }
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The directory `profile use` maps: `--dir`, or else the current project.
+/// Canonical, so a run finds it whatever symlinks led there. With `--none`
+/// it may be gone: that's how a deleted project's mapping is removed.
+fn mapped_dir(dir: Option<&Path>, none: bool) -> Result<String> {
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let dir = match dir {
+        Some(d) => match d.canonicalize() {
+            Ok(c) if !c.is_dir() => bail!("--dir {}: not a directory", d.display()),
+            Ok(c) => c,
+            Err(_) if none => canonical_gone(&cwd.join(d)),
+            Err(e) => return Err(e).with_context(|| format!("--dir {}", d.display())),
+        },
+        None => names::project_dir(&cwd).to_path_buf(),
+    };
+    dir.into_os_string().into_string().map_err(|d| {
+        anyhow!(
+            "{}: hush can only map a directory whose path is UTF-8",
+            d.display()
+        )
+    })
+}
+
+/// A path that doesn't exist, spelled as it was stored when it did: `.` and
+/// `..` resolved, and its deepest existing ancestor canonicalized.
+fn canonical_gone(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut lexical = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                lexical.pop();
+            }
+            c => lexical.push(c),
+        }
+    }
+    let mut rest = Vec::new();
+    let mut base = lexical.as_path();
+    loop {
+        if let Ok(canonical) = base.canonicalize() {
+            return rest.into_iter().rev().fold(canonical, |p, c| p.join(c));
+        }
+        match (base.parent(), base.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                base = parent;
+            }
+            _ => return lexical,
+        }
+    }
 }
 
 fn profile_arg(profile: Option<&str>) -> Result<Option<&str>> {
