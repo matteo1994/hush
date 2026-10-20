@@ -4,7 +4,7 @@
 //! - the project's `.env`: `_KEY`-suffixed names only, since it usually
 //!   holds other settings too;
 //! - `~/.config/hush/global.env`: every name it lists, for secrets used by
-//!   globally installed tools (e.g. `TYPESAFE_API_KEY` for `mile crew`);
+//!   globally installed tools (e.g. a coding agent's `ANTHROPIC_API_KEY`);
 //! - `--secret NAME` flags.
 //!
 //! None of this is a security boundary — any process in the project can
@@ -111,10 +111,10 @@ mod tests {
 
     #[test]
     fn global_file_takes_every_name() {
-        let global = "# tools\nTYPESAFE_API_KEY=\nGH_TOKEN\nexport OTHER=1\nnot a name\n";
+        let global = "# tools\nANTHROPIC_API_KEY=\nGH_TOKEN\nexport OTHER=1\nnot a name\n";
         assert_eq!(
             global_names(global),
-            vec!["TYPESAFE_API_KEY", "GH_TOKEN", "OTHER"]
+            vec!["ANTHROPIC_API_KEY", "GH_TOKEN", "OTHER"]
         );
     }
 
@@ -186,13 +186,13 @@ mod tests {
         let t = Tree::new("collect");
         t.dir("repo/.git");
         t.file("repo/.env", "PROJECT_KEY=\nSHARED_KEY=\n");
-        let global = t.file("global.env", "SHARED_KEY=\nTYPESAFE_API_KEY=\n");
+        let global = t.file("global.env", "SHARED_KEY=\nANTHROPIC_API_KEY=\n");
         let cwd = t.dir("repo/src");
 
         let names = collect(&cwd, &global, &["FLAG_KEY".into(), "PROJECT_KEY".into()]).unwrap();
         assert_eq!(
             names,
-            vec!["PROJECT_KEY", "SHARED_KEY", "TYPESAFE_API_KEY", "FLAG_KEY"]
+            vec!["PROJECT_KEY", "SHARED_KEY", "ANTHROPIC_API_KEY", "FLAG_KEY"]
         );
 
         // A missing global file is fine.
