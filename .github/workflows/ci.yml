@@ -38,10 +38,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux only: on a private repo macOS minutes bill at 10x. Run
-        # `cargo test` on a Mac before opening a PR that touches the macOS
-        # code (harden.rs, the keychain-backed trust store).
-        os: [ubuntu-latest]
+        # macOS too: harden.rs's macOS paths and the keychain-backed trust
+        # store only run there. Free on a public repo; on a private one macOS bills at 10x.
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
