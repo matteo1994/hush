@@ -38,9 +38,9 @@ A `hush run` gets a placeholder for every name from three sources:
    export STRIPE_SECRET_KEY=
    ```
 
-2. **`~/.config/hush/global.env`**: every name it lists, in every `hush run`, wherever it starts. This is for secrets that belong to a globally installed tool rather than a project, such as `TYPESAFE_API_KEY` for `mile crew`.
+2. **`~/.config/hush/global.env`**: every name it lists, in every `hush run`, wherever it starts. This is for secrets that belong to you or a globally installed tool rather than to a project, such as the `ANTHROPIC_API_KEY` of a coding agent you use everywhere.
 
-3. **`--secret NAME`** (repeatable), for one-off commands: `hush run --secret TYPESAFE_API_KEY -- mile crew judge`.
+3. **`--secret NAME`** (repeatable), for one-off commands: `hush run --secret OPENAI_API_KEY -- python summarize.py`.
 
 Each name is looked up in the vault (in the run's profile, if it has one, and filtered by `--env` if given). Names with no matching binding are skipped with a warning. Value columns are ignored entirely: the real value only ever lives in the vault. If no source names anything, `hush run` doesn't ask for the passphrase at all.
 
@@ -116,7 +116,7 @@ hush profile ls
 
 # Run something with managed secrets in scope, none of them ever in its real form
 hush run -- python billing_client.py
-hush run --secret TYPESAFE_API_KEY -- mile crew judge   # a secret not listed in any .env
+hush run --secret OPENAI_API_KEY -- python summarize.py   # a secret not listed in any .env
 hush run --env staging -- ./deploy.sh
 hush run --profile acme -- ./deploy.sh      # one run with acme, wherever it starts
 hush run -- claude                          # a coding agent and everything it starts
