@@ -53,7 +53,7 @@ Two projects often use the same variable name for different keys: `OPENAI_API_KE
 ```bash
 hush secret add OPENAI_API_KEY --host api.openai.com                          # unprofiled
 hush secret add OPENAI_API_KEY --host acme.openai.azure.com --profile acme    # acme's own
-hush secret ls                     # every entry, each marked with its profile
+hush secret ls                     # every entry, profiled ones marked with their profile
 hush secret ls --profile acme      # what a run with acme gets
 ```
 
@@ -61,7 +61,7 @@ A run with a profile takes that profile's entry for each name, and the unprofile
 
 A run gets its profile in one of two ways:
 
-- **`hush profile use acme`**, once, in the project. It maps the project's directory (the git root, or the current directory outside a repo; `--dir DIR` for another) to `acme`, and every `hush run` in that directory or below it uses acme and says so. `hush profile use --none` removes the mapping, and `hush profile ls` lists profiles with the directories mapped to them. The map is kept in the vault, so changing it takes the passphrase, and nothing is written to the project.
+- **`hush profile use acme`**, once, in the project. It maps the project's directory (the git root, or the current directory outside a repo; `--dir DIR` for another) to `acme`, and every `hush run` in that directory or below it uses acme and says so, unless a directory nearer to where it starts is mapped to another profile. `hush profile use --none` removes the mapping, and `hush profile ls` lists profiles with the directories mapped to them. The map is kept in the vault, so changing it takes the passphrase, and nothing is written to the project.
 - **`hush run --profile acme`**, for one run. It overrides the mapping.
 
 A mapping is to a path, so a project that moves or is renamed loses it, and its runs use the unprofiled entries. `hush run` warns when a mapped directory with the project's name no longer exists; run `hush profile use` in the new place. Mappings to directories that are gone aren't removed by themselves, since a directory on an unmounted drive looks the same; `profile ls` marks them, and `hush profile use --none --dir PATH` removes one. A mistyped `--profile`, or a mapped profile with no entries left, also falls back to the unprofiled entries with a warning.
