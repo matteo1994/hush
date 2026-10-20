@@ -395,7 +395,12 @@ fn relay_response<U: BufRead, W: Write>(
         // would hand the child whatever the bound host put in it.
         if out.scrubber.active() && unscannable_body(body, &resp.headers) {
             refuse_unscanned(out)?;
-            return Ok(false);
+            // An error, so it's in the summary `hush run` prints: the 502
+            // only reaches the child, and you'd never learn why it failed.
+            bail!(
+                "refused a bound host's response with {}, which hush can't scan for secrets",
+                unscannable_codings(&resp.headers)
+            );
         }
         if out.scrubber.active() && body == Body::Chunked {
             // Finish the head on its own so chunk-size lines never sit in
@@ -445,6 +450,18 @@ fn unscannable_body(body: Body, headers: &[(String, String)]) -> bool {
         Body::None | Body::Length(0) => false,
         Body::Length(_) | Body::Chunked | Body::UntilClose => !encodings_scannable(headers),
     }
+}
+
+/// The codings that made a body unscannable, as `Content-Encoding: gzip`.
+fn unscannable_codings(headers: &[(String, String)]) -> String {
+    let content = header_codings(headers, "content-encoding");
+    if content.iter().any(|t| t != "identity") {
+        return format!("Content-Encoding: {}", content.join(", "));
+    }
+    format!(
+        "Transfer-Encoding: {}",
+        header_codings(headers, "transfer-encoding").join(", ")
+    )
 }
 
 /// Replaces a bound host's response with a fixed 502. The status line and
@@ -714,9 +731,56 @@ impl Scrubber {
         if end_of_stream {
             return std::mem::take(&mut self.pending);
         }
-        let keep = self.aligned_keep(self.hold.min(self.pending.len()));
+        let keep = self.aligned_keep(self.needed_keep());
         let rest = self.pending.split_off(self.pending.len() - keep);
         std::mem::replace(&mut self.pending, rest)
+    }
+
+    /// How many trailing bytes must wait for the next read: those from the
+    /// earliest one where a value, or an encoded form of one, could start
+    /// and still be unfinished. Usually far fewer than `hold`, which covers
+    /// a value with every byte escaped: holding all of that would leave a
+    /// streamed response several events behind.
+    fn needed_keep(&self) -> usize {
+        let data = &self.pending;
+        let len = data.len();
+        let window = len - self.hold.min(len);
+        let mut start = len;
+        // Raw, JSON-escaped and percent-encoded forms: a match that begins
+        // before `window` is complete in `data`, so it was already painted.
+        for j in window..len {
+            if self
+                .secrets
+                .iter()
+                .any(|secret| could_still_match(&data[j..], secret))
+            {
+                start = j;
+                break;
+            }
+        }
+        // Base64: a run that reaches the end may still grow into an encoded
+        // value, so keep its last stretch, cut on a quantum boundary.
+        let b64_hold = self
+            .secrets
+            .iter()
+            .filter(|s| s.len() >= MIN_BASE64_SECRET)
+            .map(|s| 4 * (s.len() + 2).div_ceil(3) - 1)
+            .max();
+        if let Some(b64_hold) = b64_hold
+            && data.last().is_some_and(|&b| is_b64_byte(b) || b == b'=')
+        {
+            let mut alphabet_end = len;
+            while alphabet_end > 0 && data[alphabet_end - 1] == b'=' {
+                alphabet_end -= 1;
+            }
+            let mut run = alphabet_end;
+            while run > 0 && is_b64_byte(data[run - 1]) {
+                run -= 1;
+            }
+            let from = run.max(len - b64_hold.min(len));
+            start = start.min(from - (from - run) % 4);
+        }
+        len - start
     }
 
     /// A base64 run has to be cut on a quantum boundary. Otherwise the next
@@ -752,6 +816,46 @@ impl Scrubber {
             paint(&mut self.pending[start..end]);
         }
     }
+}
+
+/// Whether `tail`, which runs to the end of what has been read, could be the
+/// unfinished start of `secret`: raw, with JSON string escapes or with
+/// percent-encoding, mixed freely (more than the scans match, which only
+/// holds back more). An escape the next read may complete counts as a start.
+fn could_still_match(tail: &[u8], secret: &[u8]) -> bool {
+    let Some(&want) = secret.first() else {
+        // All of it matched within the data: painted already.
+        return false;
+    };
+    let Some(&b) = tail.first() else {
+        return true;
+    };
+    if b == b'\\' {
+        match json_escape(tail) {
+            Some(esc) => {
+                if secret.starts_with(&esc.bytes[..esc.len])
+                    && could_still_match(&tail[esc.consumed..], &secret[esc.len..])
+                {
+                    return true;
+                }
+            }
+            // `\`, `\u00`, a high surrogate waiting for its pair.
+            None if tail.len() < 12 => return true,
+            None => {}
+        }
+    }
+    if b == b'%' {
+        match percent_byte(tail) {
+            Some(byte) => {
+                if byte == want && could_still_match(&tail[3..], &secret[1..]) {
+                    return true;
+                }
+            }
+            None if tail.len() < 3 => return true,
+            None => {}
+        }
+    }
+    b == want && could_still_match(&tail[1..], &secret[1..])
 }
 
 /// Longest byte string that can still be one encoding of a value this long:
@@ -1647,6 +1751,19 @@ pub mod fuzzing {
                 "{secret} survived"
             );
         }
+        // Nor in an encoded form, wherever the reads were cut: scanning the
+        // output again in one piece finds nothing left to paint.
+        let secrets: Vec<Vec<u8>> = secrets
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(String::into_bytes)
+            .collect();
+        let left = secret_spans(&out, &secrets, true);
+        assert!(
+            left.is_empty(),
+            "an encoded value survived at {left:?}: {:?}",
+            String::from_utf8_lossy(&out)
+        );
     }
 }
 
@@ -2040,6 +2157,30 @@ mod tests {
         );
     }
 
+    /// A streamed response (server-sent events) must reach the client as
+    /// each event ends, not held back by the length of the longest encoded
+    /// form of a key.
+    #[test]
+    fn scrubber_releases_a_streamed_event_once_it_ends() {
+        let key = format!("sk-ant-api03-{}", "x9Z".repeat(32));
+        let mut s = Scrubber::new(vec![key.clone()]);
+        let event = "event: content_block_delta\ndata: {\"type\":\"text_delta\",\"text\":\"streamed tokens\"}\n\n";
+        for _ in 0..5 {
+            assert_eq!(s.feed(event.as_bytes()), event.as_bytes());
+        }
+
+        // What could still become the key, or an encoded form of it, waits.
+        for tail in ["sk-ant-ap", "\\u0073k-ant", "%73k-", "s\\u00", "\\", "%7"] {
+            let mut s = Scrubber::new(vec![key.clone()]);
+            let out = s.feed(format!("text: {tail}").as_bytes());
+            assert_eq!(out, b"text: ", "{tail}");
+            assert_eq!(s.finish(), tail.as_bytes(), "{tail}");
+        }
+        // Text that can't become the key goes out at once.
+        let mut s = Scrubber::new(vec![key.clone()]);
+        assert_eq!(s.feed(b"stop, skip it\n"), b"stop, skip it\n");
+    }
+
     #[test]
     fn scrubber_redacts_json_percent_and_base64_forms() {
         let slash = "sk-live/secret";
@@ -2258,6 +2399,18 @@ mod tests {
         assert!(summary.ends_with("\n  2× other errors"), "{summary}");
     }
 
+    /// What the client got from a response hush refuses, and the error that
+    /// goes in the run's summary.
+    fn relay_refused(secrets: &[&str], wire: &[u8]) -> (Vec<u8>, String) {
+        let mut client = Vec::new();
+        let mut out = Scrubbed {
+            scrubber: Scrubber::new(secrets.iter().map(|s| (*s).to_string()).collect()),
+            out: &mut client,
+        };
+        let err = relay_response(&mut BufReader::new(wire), &mut out, "GET").unwrap_err();
+        (client, format!("{err:#}"))
+    }
+
     fn relay_with(secrets: &[&str], wire: &[u8], method: &str) -> Result<(Vec<u8>, bool)> {
         let mut client = Vec::new();
         let mut out = Scrubbed {
@@ -2399,19 +2552,25 @@ mod tests {
                 "HTTP/1.1 200 OK\r\nContent-Encoding: {coding}\r\nContent-Length: {}\r\n\r\n{secret}",
                 secret.len()
             );
-            let (resp, reusable) = relay_with(&[secret], wire.as_bytes(), "GET").unwrap();
-            assert!(!reusable, "{coding}");
+            let (resp, err) = relay_refused(&[secret], wire.as_bytes());
             let text = String::from_utf8_lossy(&resp);
             assert!(text.starts_with("HTTP/1.1 502"), "{coding}: {text}");
             assert!(!text.contains(secret), "{coding}: {text}");
+            assert_eq!(
+                err,
+                format!(
+                    "refused a bound host's response with Content-Encoding: {coding}, which hush can't scan for secrets"
+                )
+            );
         }
         let wire = format!(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\n{secret}\r\n0\r\n\r\n"
         );
-        let (resp, _) = relay_with(&[secret], wire.as_bytes(), "GET").unwrap();
+        let (resp, err) = relay_refused(&[secret], wire.as_bytes());
         let text = String::from_utf8_lossy(&resp);
         assert!(text.starts_with("HTTP/1.1 502"), "{text}");
         assert!(!text.contains(secret), "{text}");
+        assert!(err.contains("Transfer-Encoding: gzip, chunked"), "{err}");
     }
 
     #[test]
