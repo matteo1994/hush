@@ -1,0 +1,4 @@
+[toolchain]
+# cargo fuzz needs nightly (-Z sanitizer). The crate itself builds on the
+# stable release pinned in ../rust-toolchain.toml.
+channel = "nightly-2026-10-16"
