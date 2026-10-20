@@ -38,8 +38,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS too: harden.rs and the keychain-backed trust store only run
-        # there. Free on a public repo; on a private one macOS bills at 10x.
+        # macOS too: harden.rs's macOS paths and the keychain-backed trust
+        # store only run there. Free on a public repo; on a private one macOS bills at 10x.
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
