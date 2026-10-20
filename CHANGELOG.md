@@ -4,6 +4,16 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.20 (2026-10-20)
+
+- Add profile use, a project runs with its own profile w/o --profile (#35)
+- Document profiles: per-project keys under a shared name, how a project picks one, and what they don't protect. (#36)
+- Replace the mile and TYPESAFE_API_KEY examples with generic ones (#38)
+- README: install hush into a root-owned /opt/hush/bin as the threat model advises, and list the C compiler the build needs. (#37)
+- Add SECURITY.md: how to report a vulnerability privately, which versions get fixes, and what counts. (#39)
+- Build on stable Rust 1.99.0 instead of a nightly (#40)
+- Run the tests on macOS in CI again, now that the repository is public. (#41)
+
 ## 0.1.19 (2026-10-19)
 
 - Add --profile to run, profiles keys, unprofiled if nothing (#34)
