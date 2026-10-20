@@ -131,6 +131,8 @@ hush run -- claude                          # a coding agent and everything it s
 
 ## Threat model
 
+Found a way around it? See [SECURITY.md](SECURITY.md) for how to report it privately.
+
 **What this protects against:** an AI agent (or anything running as your own user) that reads env vars, inspects config files, or is prompt-injected into printing or exfiltrating "the API key" — because the real bytes are never in its reachable process tree in the first place. Also protects the value at rest: the vault file is encrypted, so directly reading it gets ciphertext.
 
 **Changing where a secret may go needs the passphrase.** `secret add`/`bind`/`rm` decrypt and rewrite the vault themselves, so a process started by `hush run` can't rebind a secret to a host it controls. It never has the passphrase, and `hush run` strips `HUSH_PASSPHRASE` and `HUSH_SECRET_VALUE` from its environment. Run from inside `hush run`, any hush command that prompts, `secret ls` too, first prints a warning: a command the agent started shares the terminal with it, and the agent can read what you type. Only type the passphrase for a command you started yourself.
