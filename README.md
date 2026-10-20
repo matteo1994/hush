@@ -42,9 +42,31 @@ A `hush run` gets a placeholder for every name from three sources:
 
 3. **`--secret NAME`** (repeatable), for one-off commands: `hush run --secret TYPESAFE_API_KEY -- mile crew judge`.
 
-Each name is looked up in the vault (filtered by `--env` if given). Names with no matching binding are skipped with a warning. Value columns are ignored entirely: the real value only ever lives in the vault. If no source names anything, `hush run` doesn't ask for the passphrase at all.
+Each name is looked up in the vault (in the run's profile, if it has one, and filtered by `--env` if given). Names with no matching binding are skipped with a warning. Value columns are ignored entirely: the real value only ever lives in the vault. If no source names anything, `hush run` doesn't ask for the passphrase at all.
 
 None of this is a security boundary. Any process in the project can edit `.env`, so it only decides which placeholders a run hands out. What protects a secret is its host binding: a placeholder only becomes the real value on the way to that host.
+
+### Profiles: the same name, a different key per project
+
+Two projects often use the same variable name for different keys: `OPENAI_API_KEY` is your own key in one and a client's Azure endpoint in another. A **profile** holds its own entries next to the unprofiled ones, each with its own value and bindings:
+
+```bash
+hush secret add OPENAI_API_KEY --host api.openai.com                          # unprofiled
+hush secret add OPENAI_API_KEY --host acme.openai.azure.com --profile acme    # acme's own
+hush secret ls                     # every entry, each marked with its profile
+hush secret ls --profile acme      # what a run with acme gets
+```
+
+A run with a profile takes that profile's entry for each name, and the unprofiled entry for names the profile doesn't have, so a key every project shares is stored once. A profile's entry replaces the unprofiled one whole: its bindings, `--env` ones included, are the only ones used. `secret bind` and `secret rm` take `--profile` too, and a profile goes away with its last entry.
+
+A run gets its profile in one of two ways:
+
+- **`hush profile use acme`**, once, in the project. It maps the project's directory (the git root, or the current directory outside a repo; `--dir DIR` for another) to `acme`, and every `hush run` in that directory or below it uses acme and says so. `hush profile use --none` removes the mapping, and `hush profile ls` lists profiles with the directories mapped to them. The map is kept in the vault, so changing it takes the passphrase, and nothing is written to the project.
+- **`hush run --profile acme`**, for one run. It overrides the mapping.
+
+A mapping is to a path, so a project that moves or is renamed loses it, and its runs use the unprofiled entries. `hush run` warns when a mapped directory with the project's name no longer exists; run `hush profile use` in the new place. Mappings to directories that are gone aren't removed by themselves, since a directory on an unmounted drive looks the same; `profile ls` marks them, and `hush profile use --none --dir PATH` removes one. A mistyped `--profile`, or a mapped profile with no entries left, also falls back to the unprofiled entries with a warning.
+
+hush 0.1.16 and earlier don't know profiles and drop them when they save the vault, so don't change the vault with an older hush once it has profiles. Since 0.1.17, hush refuses to open a vault written by a newer version instead of losing what it doesn't understand.
 
 ### HTTPS
 
@@ -87,10 +109,16 @@ hush secret bind BILLING_API_KEY --host 127.0.0.1:3000 --env dev  # a local dev 
 hush secret ls                              # list names + bindings, never values
 hush secret rm BILLING_API_KEY
 
+# A different key under the same name for one project (see Profiles)
+hush secret add BILLING_API_KEY --host api.acme.example --profile acme
+cd ~/src/acme && hush profile use acme      # runs in this project now use acme's entries
+hush profile ls
+
 # Run something with managed secrets in scope, none of them ever in its real form
 hush run -- python billing_client.py
 hush run --secret TYPESAFE_API_KEY -- mile crew judge   # a secret not listed in any .env
 hush run --env staging -- ./deploy.sh
+hush run --profile acme -- ./deploy.sh      # one run with acme, wherever it starts
 hush run -- claude                          # a coding agent and everything it starts
 ```
 
@@ -121,6 +149,8 @@ hush run -- claude                          # a coding agent and everything it s
 **A bound host that echoes the key back**, such as a request-inspection endpoint like postman-echo or an error message that quotes it, is mostly covered. hush asks bound hosts for uncompressed responses (`Accept-Encoding: identity`) and replaces every real value in their response headers and body with a same-length `HUSH_REDACTED***` marker. That only catches the value as it was sent. A server that compresses anyway, escapes or re-encodes the key (base64, JSON `\u` escapes), echoes part of it, or splits it across chunk boundaries or responses still leaks it. Only bind hosts you trust with the key.
 
 **A key that gets another key.** hush keeps the child from reading the key, not from using it: every request the child sends to the bound host carries the real value, so the child can do anything the key allows there. With many vendor APIs that includes creating a new API key, exchanging the key for an OAuth or session token, or reading back a stored credential. The new credential comes back in an ordinary response, and the redaction above only knows the values in the vault, so the child gets it in full and can send it anywhere. Where the vendor offers one, bind a restricted key: limited to the endpoints the work needs, unable to create or manage keys, and with a spending or rate limit if there is one.
+
+**Profiles are not a boundary between projects.** They choose which key a run gets, not who may have it. All profiles live in one vault behind one passphrase, and a run you start with `--profile` from any directory gets that profile's keys; `.env` and the directory map only decide what a run gets by default. What a run's child can reach is still only the keys that run minted, each going only to its bound host. A child can't change which profile later runs use, since the map is in the vault. If a project's agent must never be able to reach another project's keys, a profile isn't enough: use a separate OS user, with its own vault.
 
 **Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
 
