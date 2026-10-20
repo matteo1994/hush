@@ -1,5 +1,6 @@
 [toolchain]
-# A dated nightly, so a new clippy lint can't turn CI red with no code
-# change. Move it forward by hand, in a PR of its own.
-channel = "nightly-2026-10-16"
+# A fixed stable release, so a new clippy lint can't turn CI red with no
+# code change, and anyone with rustup builds with what CI tests. Move it
+# forward by hand, in a PR of its own.
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]
