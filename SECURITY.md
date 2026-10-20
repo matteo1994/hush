@@ -27,7 +27,7 @@ These are among the known limits the threat model describes, and aren't vulnerab
 - anything that needs root, or, on macOS, a process allowed to read another's memory (Developer Mode or `DevToolsSecurity -enable`) when hush isn't signed with the hardened runtime;
 - a same-user process tricking you into typing the passphrase somewhere it can read it, or replacing a `hush` binary you installed where your user can write;
 - restoring an older copy of the vault file, or deleting or locking the files in `~/.config/hush`;
-- a bound host that echoes only part of the key, splits one value across two responses, compresses the body without declaring a content encoding, or re-encodes the key in a form hush does not scan (a second layer of encoding, HTML entities, base64 broken up with whitespace);
+- a bound host that echoes only part of the key; splits one value across two responses, between chunk data and a trailer, or across the blank line between headers and body; sends a compressed body without declaring a content encoding, or behind a response head hush cannot parse; or re-encodes the key in a form hush does not scan (a second layer of encoding, HTML entities, base64 broken up with whitespace, base64 of a secret shorter than 4 bytes, or base64 preceded by another base64-alphabet character, including a run that mixes `+/` with `-_`);
 - what the key itself allows at its bound host, such as creating another key;
 - profiles not separating projects from each other: one vault and one passphrase hold them all;
 - `HUSH_PASSPHRASE` and `HUSH_SECRET_VALUE` being visible to whatever can read the environment they're set in;

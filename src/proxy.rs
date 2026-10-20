@@ -654,9 +654,12 @@ fn copy_until_close<R: Read, W: Write>(src: &mut R, dst: &mut W) -> Result<()> {
 /// it, a request-inspection endpoint) can't hand it to the child. Same length
 /// keeps `Content-Length` valid. Chunk framing is stripped before a body is
 /// scanned and put back afterwards, so a value split across chunks is one
-/// span here. JSON string escapes, a single layer of percent-encoding, and
-/// base64 (standard or url-safe, alone or inside a longer blob) are scanned
-/// too. A value split across two responses, or encoded a second time, isn't.
+/// span here. JSON string escapes, including a `\u` surrogate pair, a single
+/// layer of percent-encoding, and base64 (standard or url-safe, alone or
+/// inside a longer blob) are scanned too. A value split across two responses,
+/// between chunk data and a trailer, or across the header/body boundary isn't,
+/// and neither is a second layer of encoding, base64 of a secret shorter than
+/// 4 bytes, or base64 shifted by a preceding base64-alphabet character.
 struct Scrubber {
     secrets: Vec<Vec<u8>>,
     /// Bytes not yet released, so a value split across reads is still caught.
@@ -883,21 +886,46 @@ fn json_escape(data: &[u8]) -> Option<Escaped> {
         b'n' => Some(simple(b'\n')),
         b'r' => Some(simple(b'\r')),
         b't' => Some(simple(b'\t')),
-        b'u' => {
-            let hex = data.get(2..6)?;
-            let hex = std::str::from_utf8(hex).ok()?;
-            let cp = u32::from_str_radix(hex, 16).ok()?;
-            let ch = char::from_u32(cp)?;
-            let mut bytes = [0u8; 4];
-            let len = ch.encode_utf8(&mut bytes).len();
-            Some(Escaped {
-                bytes,
-                len,
-                consumed: 6,
-            })
-        }
+        b'u' => decode_json_u(data),
         _ => None,
     }
+}
+
+/// `\uXXXX` at the start of `data`, as a code unit.
+fn json_u_unit(data: &[u8]) -> Option<u32> {
+    if data.first() != Some(&b'\\') || data.get(1) != Some(&b'u') {
+        return None;
+    }
+    let hex = std::str::from_utf8(data.get(2..6)?).ok()?;
+    u32::from_str_radix(hex, 16).ok()
+}
+
+/// One `\uXXXX`, or a surrogate pair (`\uD83D\uDE00`) decoded to the UTF-8 of
+/// the non-BMP character. A lone surrogate is not an escape.
+fn decode_json_u(data: &[u8]) -> Option<Escaped> {
+    let unit = json_u_unit(data)?;
+    if let Some(ch) = char::from_u32(unit) {
+        let mut bytes = [0u8; 4];
+        let len = ch.encode_utf8(&mut bytes).len();
+        return Some(Escaped {
+            bytes,
+            len,
+            consumed: 6,
+        });
+    }
+    let low = json_u_unit(data.get(6..)?)?;
+    if !(0xD800..0xDC00).contains(&unit) || !(0xDC00..0xE000).contains(&low) {
+        return None;
+    }
+    let cp = 0x10000 + (((unit - 0xD800) << 10) | (low - 0xDC00));
+    let ch = char::from_u32(cp)?;
+    let mut bytes = [0u8; 4];
+    let len = ch.encode_utf8(&mut bytes).len();
+    Some(Escaped {
+        bytes,
+        len,
+        consumed: 12,
+    })
 }
 
 /// Length of a JSON-string encoding of `secret` at the start of `data`.
@@ -1158,48 +1186,71 @@ fn write_chunk(dst: &mut impl Write, data: &[u8]) -> io::Result<()> {
     dst.write_all(b"\r\n")
 }
 
-/// Head, chunk data and trailers of one response: what the client has once
-/// it strips chunk framing. Anything that isn't a complete chunked response
-/// is returned unchanged.
+/// Head plus chunk data, and the trailer block, of one chunked response.
+/// Trailers stay separate: the body scrubber is finished before they are
+/// scanned, so a value split across that boundary is not one span. Anything
+/// that isn't a complete chunked response comes back as the first buffer,
+/// unchanged, with empty trailers.
 #[cfg(any(test, fuzzing))]
-fn client_visible_bytes(resp: &[u8]) -> Vec<u8> {
+fn client_visible_parts(resp: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let unchanged = || (resp.to_vec(), Vec::new());
     let Some(rel) = find_double_crlf(resp) else {
-        return resp.to_vec();
+        return unchanged();
     };
     let head_end = rel + 4;
     let Some(parsed) = parse_response_head(&resp[..head_end]) else {
-        return resp.to_vec();
+        return unchanged();
     };
     let transfer = header_codings(&parsed.headers, "transfer-encoding");
     if !(transfer.len() == 1 && transfer[0] == "chunked") {
-        return resp.to_vec();
+        return unchanged();
     }
-    let mut out = resp[..head_end].to_vec();
+    let mut body = resp[..head_end].to_vec();
     let mut rest = &resp[head_end..];
     loop {
         let Some(nl) = rest.windows(2).position(|w| w == b"\r\n") else {
-            return resp.to_vec();
+            return unchanged();
         };
         let line = &rest[..nl];
         rest = &rest[nl + 2..];
         let token = line.split(|&b| b == b';').next().unwrap_or(line);
         let token = trim_ascii(token);
-        if token.is_empty() || !token.iter().all(u8::is_ascii_hexdigit) {
-            return resp.to_vec();
-        }
-        let Ok(size) = usize::from_str_radix(&String::from_utf8_lossy(token), 16) else {
-            return resp.to_vec();
+        let Some(size) = parse_hex_u64(token) else {
+            return unchanged();
         };
         if size == 0 {
-            out.extend_from_slice(rest);
-            return out;
+            return (body, rest.to_vec());
         }
-        if rest.len() < size + 2 || &rest[size..size + 2] != b"\r\n" {
-            return resp.to_vec();
+        let Some(size) = usize::try_from(size).ok() else {
+            return unchanged();
+        };
+        let Some(end) = size.checked_add(2) else {
+            return unchanged();
+        };
+        let Some(chunk) = rest.get(..end) else {
+            return unchanged();
+        };
+        if &chunk[size..] != b"\r\n" {
+            return unchanged();
         }
-        out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        body.extend_from_slice(&chunk[..size]);
+        rest = &rest[end..];
     }
+}
+
+/// A chunk-size token. Longer than 16 hex digits cannot fit in `u64`, and a
+/// size that doesn't fit in `usize` is rejected by the caller; either way the
+/// helper returns the response unchanged instead of panicking.
+#[cfg(any(test, fuzzing))]
+fn parse_hex_u64(token: &[u8]) -> Option<u64> {
+    if token.is_empty() || token.len() > 16 {
+        return None;
+    }
+    let mut n = 0u64;
+    for &b in token {
+        n = n.checked_mul(16)?.checked_add(u64::from(hex_val(b)?))?;
+    }
+    Some(n)
 }
 
 #[cfg(any(test, fuzzing))]
@@ -1525,12 +1576,12 @@ pub mod fuzzing {
     }
 
     /// A server's responses, relayed to the client through a `Scrubber`.
-    /// No real value may reach the client within one response, whatever the
-    /// server sends and wherever relaying fails — including a value split
-    /// across chunk boundaries, which is checked on the bytes the client
-    /// has once chunk framing is removed. Across two responses it can: each
-    /// is scrubbed on its own, as holding back the end of one would stall
-    /// the client.
+    /// No real value may reach the client as a contiguous span of the raw
+    /// bytes, of the chunk data once framing is removed, or of the trailer
+    /// block. Those three are checked separately: the body scrubber is
+    /// finished before trailers are scanned, so a value split across that
+    /// boundary is delivered, and holding the tail of one response to catch
+    /// a split across two responses would stall the client.
     pub fn response(data: &[u8]) {
         let Some((&method, data)) = data.split_first() else {
             return;
@@ -1546,17 +1597,20 @@ pub mod fuzzing {
             };
             let more = relay_response(&mut src, &mut out, method);
             let raw = &client[start..];
-            let visible = client_visible_bytes(raw);
+            let (body, trailers) = client_visible_parts(raw);
             for secret in SECRETS {
+                let bytes = secret.as_bytes();
                 assert!(
-                    !raw.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                    !raw.windows(bytes.len()).any(|w| w == bytes),
                     "{secret} reached the client"
                 );
                 assert!(
-                    !visible
-                        .windows(secret.len())
-                        .any(|w| w == secret.as_bytes()),
+                    !body.windows(bytes.len()).any(|w| w == bytes),
                     "{secret} reached the client after decoding chunks"
+                );
+                assert!(
+                    !trailers.windows(bytes.len()).any(|w| w == bytes),
+                    "{secret} reached the client in a trailer"
                 );
             }
             if !matches!(more, Ok(true)) {
@@ -2007,6 +2061,27 @@ mod tests {
         assert!(!redacted.contains("\\u0073"), "{redacted}");
         assert_eq!(redacted.len(), unicode.len());
 
+        // A non-BMP character is a surrogate pair, not one `\uXXXX`.
+        let grin = "\u{1F600}";
+        for encoded in [r"\uD83D\uDE00", r"\ud83d\ude00"] {
+            for split in 0..=encoded.len() {
+                let (a, b) = encoded.split_at(split);
+                let redacted = scrub_in_pieces(&[grin], &[a, b]);
+                assert_eq!(redacted.len(), encoded.len());
+                assert!(!redacted.contains(grin), "split={split} {redacted}");
+                assert!(
+                    !redacted.to_ascii_lowercase().contains("d83d"),
+                    "split={split} {redacted}"
+                );
+            }
+        }
+        let mixed = format!("sk-{grin}-key");
+        let mixed_json = r"sk-\uD83D\uDE00-key";
+        let redacted = scrub_in_pieces(&[&mixed], &[mixed_json]);
+        assert_eq!(redacted.len(), mixed_json.len());
+        assert!(!redacted.contains(grin), "{redacted}");
+        assert!(!redacted.contains("sk-"), "{redacted}");
+
         // `\/` is the escape; the other bytes are raw. Split across reads.
         let mixed = "sk-live\\/secret";
         for split in 0..=mixed.len() {
@@ -2213,25 +2288,68 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&resp)
         );
-        let visible = client_visible_bytes(&resp);
+        let (body, trailers) = client_visible_parts(&resp);
         assert!(
-            !visible
+            !body.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            !trailers
                 .windows(secret.len())
                 .any(|w| w == secret.as_bytes()),
             "{}",
-            String::from_utf8_lossy(&visible)
+            String::from_utf8_lossy(&trailers)
         );
         assert!(
-            visible
-                .windows(b"HUSH_REDACTED".len())
+            body.windows(b"HUSH_REDACTED".len())
                 .any(|w| w == b"HUSH_REDACTED"),
             "{}",
-            String::from_utf8_lossy(&visible)
+            String::from_utf8_lossy(&body)
         );
-        // The trailer echo is scrubbed too, and the extension form below
-        // never arrives: chunk-size lines are not forwarded.
-        let text = String::from_utf8_lossy(&visible);
+        // The trailer echo is scrubbed on its own stream, and the extension
+        // form below never arrives: chunk-size lines are not forwarded.
+        let text = String::from_utf8_lossy(&trailers);
         assert!(text.contains("X-Echo: HUSH_REDACTED"), "{text}");
+    }
+
+    /// The body scrubber is finished before trailers are scanned, so a value
+    /// cut between the last chunk and the first trailer is two spans.
+    #[test]
+    fn chunked_response_leaves_a_value_split_across_body_and_trailer() {
+        let secret = "sk-0123456789abcdef";
+        let (left, right) = secret.split_at(8);
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
+             {ll:x}\r\n{left}\r\n0\r\nX-Echo: {right}\r\n\r\n",
+            ll = left.len(),
+        );
+        let (resp, _) = relay_with(&[secret], wire.as_bytes(), "GET").unwrap();
+        let (body, trailers) = client_visible_parts(&resp);
+        assert!(
+            !body.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "{}",
+            String::from_utf8_lossy(&body)
+        );
+        assert!(
+            !trailers
+                .windows(secret.len())
+                .any(|w| w == secret.as_bytes()),
+            "{}",
+            String::from_utf8_lossy(&trailers)
+        );
+        let body_text = String::from_utf8_lossy(&body);
+        let trailer_text = String::from_utf8_lossy(&trailers);
+        assert!(body_text.contains(left), "{body_text}");
+        assert!(trailer_text.contains(right), "{trailer_text}");
+    }
+
+    #[test]
+    fn client_visible_parts_does_not_panic_on_a_huge_chunk_size() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n";
+        let (body, trailers) = client_visible_parts(resp);
+        assert!(trailers.is_empty());
+        assert_eq!(body, resp);
     }
 
     #[test]
@@ -2244,11 +2362,11 @@ mod tests {
         let (resp, _) = relay_with(&[secret], wire.as_bytes(), "GET").unwrap();
         let text = String::from_utf8_lossy(&resp);
         assert!(!text.contains(secret), "{text}");
-        let visible = client_visible_bytes(&resp);
+        let (body, _) = client_visible_parts(&resp);
         assert!(
-            visible.windows(5).any(|w| w == b"hello"),
+            body.windows(5).any(|w| w == b"hello"),
             "{}",
-            String::from_utf8_lossy(&visible)
+            String::from_utf8_lossy(&body)
         );
     }
 
@@ -2264,8 +2382,8 @@ mod tests {
             rl = right.len(),
         );
         let (resp, _) = relay_with(&[secret], wire.as_bytes(), "GET").unwrap();
-        let visible = client_visible_bytes(&resp);
-        let text = String::from_utf8_lossy(&visible);
+        let (body, _) = client_visible_parts(&resp);
+        let text = String::from_utf8_lossy(&body);
         assert!(!text.contains(secret), "{text}");
         assert!(!text.contains('\\'), "{text}");
         assert!(text.contains("HUSH_REDACTED"), "{text}");
