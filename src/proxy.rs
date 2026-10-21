@@ -378,8 +378,16 @@ fn relay_response<U: BufRead, W: Write>(
     loop {
         let head = read_head(upstream)?.context("upstream closed before responding")?;
         let Some(resp) = parse_response_head(&head) else {
-            // Nothing to frame it by: pass it on as it comes, to the end.
-            // Still scrubbed, so a plaintext echo in the bytes doesn't pass.
+            // No framing, so a compressed or chunked body can't be scanned.
+            // A bound host gets the fixed 502; the reason is a constant, so
+            // the unreadable head never reaches the run summary. With nothing
+            // to scrub, the bytes are passed on as they come.
+            if out.scrubber.active() {
+                refuse_unscanned(out)?;
+                bail!(
+                    "refused a bound host's response with an unreadable head, which hush can't scan for secrets"
+                );
+            }
             out.write_all(&head)?;
             copy_body(upstream, out, Body::UntilClose)?;
             out.finish()?;
@@ -2285,16 +2293,35 @@ mod tests {
         }
 
         let spaced = "sk live/x";
-        let percent = "sk%20live%2Fx";
-        let redacted = scrub_in_pieces(&[spaced], &[percent]);
-        assert_eq!(redacted.len(), percent.len(), "{redacted}");
-        assert!(!redacted.contains("%20"), "{redacted}");
-        assert!(!redacted.contains(spaced), "{redacted}");
+        // Splits include the inside of an escape (`%|20`, `%2|0`, `%|2F`).
+        for percent in ["sk%20live%2Fx", "sk%20live%2fx"] {
+            for split in 0..=percent.len() {
+                let (a, b) = percent.split_at(split);
+                let redacted = scrub_in_pieces(&[spaced], &[a, b]);
+                assert_eq!(redacted.len(), percent.len(), "split={split} {redacted}");
+                assert!(!redacted.contains(spaced), "split={split} {redacted}");
+                assert!(!redacted.contains('%'), "split={split} {redacted}");
+            }
+        }
 
-        let lower = "sk%20live%2fx";
-        let redacted = scrub_in_pieces(&[spaced], &[lower]);
-        assert!(!redacted.contains("%2f"), "{redacted}");
-        assert!(!redacted.contains("%2F"), "{redacted}");
+        // Longer than the hold, so a prefix is released before the encoding
+        // that straddles two reads has all arrived. Two copies, so painting
+        // the first must not hide the second.
+        let percent = "sk%20live%2Fx";
+        let mut long = "q".repeat(80);
+        long.push_str(percent);
+        long.push_str("mid");
+        long.push_str(percent);
+        let pieces: Vec<String> = long
+            .as_bytes()
+            .chunks(17)
+            .map(|c| String::from_utf8(c.to_vec()).unwrap())
+            .collect();
+        let refs: Vec<&str> = pieces.iter().map(String::as_str).collect();
+        let redacted = scrub_in_pieces(&[spaced], &refs);
+        assert_eq!(redacted.len(), long.len());
+        assert!(!redacted.contains(spaced), "{redacted}");
+        assert!(!redacted.contains('%'), "{redacted}");
 
         // A value that base64-encodes with `+` and `/`, and its url-safe form.
         let plus = ">>>>>>";
@@ -2681,6 +2708,45 @@ mod tests {
             err,
             "refused a bound host's response with both Content-Length and Transfer-Encoding, which hush can't scan for secrets"
         );
+    }
+
+    /// A head httparse rejects has no framing, so the body behind it — gzip
+    /// bytes, or a value split across chunk boundaries — is not forwarded.
+    #[test]
+    fn unparsable_head_from_a_bound_host_is_not_forwarded() {
+        let secret = "sk-0123456789abcdef";
+        let cases = [
+            format!(
+                "HTTP/1.1 2x0 Odd\r\nContent-Encoding: gzip\r\nX-Echo: {secret}\r\n\r\n{secret}"
+            ),
+            format!(
+                "HTTP/1.1 2x0 Odd\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{}\r\n9\r\n{}\r\n0\r\n\r\n",
+                &secret[..7],
+                &secret[7..]
+            ),
+        ];
+        for wire in cases {
+            let (resp, err) = relay_refused(&[secret], wire.as_bytes());
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 502"), "{text}");
+            assert!(!text.contains(secret), "{text}");
+            assert!(!text.contains("2x0"), "{text}");
+            assert!(!err.contains(secret), "{err}");
+            assert!(!err.contains("2x0"), "{err}");
+            assert_eq!(
+                err,
+                "refused a bound host's response with an unreadable head, which hush can't scan for secrets"
+            );
+        }
+    }
+
+    #[test]
+    fn unparsable_head_from_an_unbound_host_is_forwarded() {
+        let secret = "sk-0123456789abcdef";
+        let wire = format!("HTTP/1.1 2x0 Odd\r\nX-Echo: {secret}\r\n\r\n{secret}");
+        let (resp, reusable) = relay_with(&[], wire.as_bytes(), "GET").unwrap();
+        assert!(!reusable);
+        assert_eq!(resp, wire.as_bytes());
     }
 
     #[test]
@@ -3724,7 +3790,11 @@ mod tests {
             ),
             ("close-delimited body", "GET", "HTTP/1.1 200 OK\r\n\r\n{auth}".to_string()),
             ("HTTP/1.0 body", "GET", "HTTP/1.0 200 OK\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string()),
-            ("unparsable head", "GET", "HTTP/1.1 2x0 Odd\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string()),
+            (
+                "unparsable head",
+                "GET",
+                "HTTP/1.1 2x0 Odd\r\nX-Echo: {auth}\r\n\r\n{auth}".to_string(),
+            ),
             (
                 "invalid content-length",
                 "GET",
@@ -3753,6 +3823,11 @@ mod tests {
             let resp = roundtrip(&mut tcp, &request);
 
             assert!(!resp.contains("REAL"), "{name}: {resp}");
+            if name == "unparsable head" {
+                assert!(resp.starts_with("HTTP/1.1 502"), "{name}: {resp}");
+                assert!(!resp.contains("2x0"), "{name}: {resp}");
+                continue;
+            }
             assert!(resp.contains("Bearer HUSH"), "{name}: no echo seen: {resp}");
         }
     }
