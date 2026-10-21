@@ -397,9 +397,11 @@ fn relay_response<U: BufRead, W: Write>(
             refuse_unscanned(out)?;
             // An error, so it's in the summary `hush run` prints: the 502
             // only reaches the child, and you'd never learn why it failed.
+            // The reason names a known coding or "unrecognized", never the
+            // raw header: a bound host can put the secret in that field.
             bail!(
                 "refused a bound host's response with {}, which hush can't scan for secrets",
-                unscannable_codings(&resp.headers)
+                refusal_reason(body, &resp.headers)
             );
         }
         if out.scrubber.active() && body == Body::Chunked {
@@ -433,7 +435,9 @@ fn header_codings(headers: &[(String, String)], name: &str) -> Vec<String> {
 /// Whether the bytes of a body can be read off the wire. `identity` (and a
 /// missing `Content-Encoding`) can. A single `chunked` transfer coding can,
 /// once the framing is stripped. Anything else — gzip, brotli, a transfer
-/// coding in front of `chunked` — would hide an echoed value.
+/// coding in front of `chunked` — would hide an echoed value. A `chunked`
+/// coding that also carries `Content-Length` is refused separately: the two
+/// headers name different ends of the body.
 fn encodings_scannable(headers: &[(String, String)]) -> bool {
     let content = header_codings(headers, "content-encoding");
     if content.iter().any(|t| t != "identity") {
@@ -443,25 +447,72 @@ fn encodings_scannable(headers: &[(String, String)]) -> bool {
     transfer.is_empty() || (transfer.len() == 1 && transfer[0] == "chunked")
 }
 
+fn has_content_length(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+}
+
 /// A body that isn't there (`HEAD`, `204`, an empty `Content-Length`) has
 /// nothing unscanned in it. Every other body must be plaintext or chunked.
+/// Chunked framing together with `Content-Length` is refused: re-chunking
+/// would forward a head whose length no longer matches the body, and a client
+/// can honor either header.
 fn unscannable_body(body: Body, headers: &[(String, String)]) -> bool {
+    if body == Body::Chunked && has_content_length(headers) {
+        return true;
+    }
     match body {
         Body::None | Body::Length(0) => false,
         Body::Length(_) | Body::Chunked | Body::UntilClose => !encodings_scannable(headers),
     }
 }
 
-/// The codings that made a body unscannable, as `Content-Encoding: gzip`.
-fn unscannable_codings(headers: &[(String, String)]) -> String {
+/// Why a body was refused, using only words hush chose. A coding token is
+/// repeated only when it is one of `KNOWN_CODINGS`; every other token,
+/// including a secret written into the header, is `unrecognized`.
+fn refusal_reason(body: Body, headers: &[(String, String)]) -> String {
+    if body == Body::Chunked && has_content_length(headers) {
+        return "both Content-Length and Transfer-Encoding".to_string();
+    }
     let content = header_codings(headers, "content-encoding");
     if content.iter().any(|t| t != "identity") {
-        return format!("Content-Encoding: {}", content.join(", "));
+        return format!("Content-Encoding: {}", describe_codings(&content));
     }
     format!(
         "Transfer-Encoding: {}",
-        header_codings(headers, "transfer-encoding").join(", ")
+        describe_codings(&header_codings(headers, "transfer-encoding"))
     )
+}
+
+/// Coding names safe to print. Matched after the header token is trimmed and
+/// lowercased, and the string that is printed is this one, not the header's.
+const KNOWN_CODINGS: &[&str] = &[
+    "br",
+    "chunked",
+    "compress",
+    "deflate",
+    "gzip",
+    "identity",
+    "x-compress",
+    "x-gzip",
+    "zstd",
+];
+
+fn coding_name(token: &str) -> &'static str {
+    KNOWN_CODINGS
+        .iter()
+        .copied()
+        .find(|known| *known == token)
+        .unwrap_or("unrecognized")
+}
+
+fn describe_codings(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|t| coding_name(t))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Replaces a bound host's response with a fixed 502. The status line and
@@ -2573,6 +2624,65 @@ mod tests {
         assert!(err.contains("Transfer-Encoding: gzip, chunked"), "{err}");
     }
 
+    /// The run summary is printed on the terminal after the child exits, so
+    /// the refusal error may name a known coding and nothing the server wrote.
+    #[test]
+    fn refusal_errors_never_quote_a_secret_in_an_encoding_header() {
+        let secret = "sk-0123456789abcdef";
+        let cases = [
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: {secret}\r\nContent-Length: {}\r\n\r\n{secret}",
+                secret.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: gzip, {secret}\r\nContent-Length: {}\r\n\r\n{secret}",
+                secret.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: {secret}\r\nContent-Length: {}\r\n\r\n{secret}",
+                secret.len()
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: {secret}, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+            ),
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {secret}\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+            ),
+        ];
+        for wire in cases {
+            let (resp, err) = relay_refused(&[secret], wire.as_bytes());
+            let text = String::from_utf8_lossy(&resp);
+            assert!(text.starts_with("HTTP/1.1 502"), "{text}");
+            assert!(!text.contains(secret), "{text}");
+            assert!(!err.contains(secret), "{err}");
+            assert!(
+                err.contains("unrecognized")
+                    || err.contains("both Content-Length and Transfer-Encoding"),
+                "{err}"
+            );
+        }
+    }
+
+    /// Both headers name a different end of the body. Re-chunking would keep
+    /// the original `Content-Length`, so the response is refused instead.
+    #[test]
+    fn chunked_response_with_a_content_length_is_refused() {
+        let secret = "sk-0123456789abcdef";
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n\
+             10\r\n{secret}\r\n0\r\n\r\n"
+        );
+        let (resp, err) = relay_refused(&[secret], wire.as_bytes());
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 502"), "{text}");
+        assert!(!text.contains(secret), "{text}");
+        assert!(!text.contains("10\r\n"), "{text}");
+        assert_eq!(
+            err,
+            "refused a bound host's response with both Content-Length and Transfer-Encoding, which hush can't scan for secrets"
+        );
+    }
+
     #[test]
     fn head_with_a_content_encoding_is_still_delivered() {
         // `HEAD` has no body. The coding describes the entity GET would
@@ -2617,6 +2727,11 @@ mod tests {
         let (resp, reusable) = relay_with(&[], chunked, "GET").unwrap();
         assert!(reusable);
         assert_eq!(resp, chunked);
+
+        // Nothing to scan, so an ambiguous length is still the server's bytes.
+        let both = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let (resp, _) = relay_with(&[], both, "GET").unwrap();
+        assert_eq!(resp, both);
     }
 
     #[test]
