@@ -108,6 +108,8 @@ hush secret bind BILLING_API_KEY --host 127.0.0.1:3000 --env dev  # a local dev 
 
 hush secret ls                              # list names + bindings, never values
 hush secret set BILLING_API_KEY             # new value, same bindings (see Rotating a key)
+hush secret set BILLING_API_KEY --max-age 90d
+hush secret unbind BILLING_API_KEY --host billing-staging.internal --env staging
 hush secret rm BILLING_API_KEY
 hush passwd                                 # change the vault passphrase
 
@@ -143,6 +145,10 @@ hush passwd    # current passphrase, then the new one twice
 ```
 
 `hush passwd` re-encrypts the vault under the new passphrase, writing it the same way as any other save (a temporary file, renamed into place, owner-only permissions). An empty or mismatched new passphrase is refused, and the vault file is left as it was.
+
+`hush secret ls` shows how long ago each value was set (`rotated 12d ago`, or `age unknown` for a secret written before this was recorded). `--max-age 90d` on `secret add` or `secret set` (also `h`, `m`, `s` and `w`) makes `hush run` warn on stderr when a secret it hands out is older than that. The warning names the secret, never the value, and the secret is still injected. `secret set --max-age none` clears the limit; omitting `--max-age` on `set` leaves it. `secret add` replaces the whole entry, so a max age has to be passed again.
+
+`hush secret unbind NAME --host HOST` removes that one binding. The secret and its other bindings stay. When the same host is bound for more than one environment, pass `--env` to say which. A secret with no bindings left is kept, and `hush run` will not inject it until it is bound again. Changing a binding is unbind, then bind; `secret bind` says so when the environment is already bound.
 
 ## Current scope (v0)
 

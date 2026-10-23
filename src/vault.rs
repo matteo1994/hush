@@ -120,6 +120,15 @@ pub struct SecretEntry {
     pub value: String,
     #[serde(default)]
     pub bindings: Vec<Binding>,
+    /// Unix seconds when the value was last set. Absent in a vault written
+    /// before rotation was recorded; `secret ls` shows that as unknown
+    /// rather than as ancient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotated_at: Option<i64>,
+    /// How long the value may be used, in seconds, before `hush run` warns.
+    /// Absent means no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_age_secs: Option<u64>,
 }
 
 impl SecretEntry {
@@ -128,13 +137,167 @@ impl SecretEntry {
     pub fn add_binding(&mut self, binding: Binding) -> Result<()> {
         if let Some(existing) = self.bindings.iter().find(|b| b.env == binding.env) {
             bail!(
-                "already bound to {} for env {}; to change that, `hush secret rm` the secret and add it again",
+                "already bound to {} for env {}; to change it, `hush secret unbind` that host and `hush secret bind` the new one",
                 existing.host,
                 binding.env.as_deref().unwrap_or("default")
             );
         }
         self.bindings.push(binding);
         Ok(())
+    }
+
+    /// Drops the one binding for `host`. Without `env`, a host bound for a
+    /// single env is that one; a host bound for several needs `--env`, so
+    /// the wrong one isn't the one that goes.
+    pub fn remove_binding(&mut self, host: &str, env: Option<&str>) -> Result<()> {
+        let host_matches = |b: &Binding| b.host.eq_ignore_ascii_case(host);
+        let indexes: Vec<usize> = self
+            .bindings
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| host_matches(b) && env.is_none_or(|e| b.env.as_deref() == Some(e)))
+            .map(|(i, _)| i)
+            .collect();
+        match indexes.as_slice() {
+            [index] => {
+                self.bindings.remove(*index);
+                Ok(())
+            }
+            [] => {
+                let others: Vec<&str> = self
+                    .bindings
+                    .iter()
+                    .filter(|b| host_matches(b))
+                    .map(|b| b.env.as_deref().unwrap_or("default"))
+                    .collect();
+                match env {
+                    Some(env) if !others.is_empty() => {
+                        bail!(
+                            "no binding for host {host} and env {env}; that host is bound for env {}",
+                            others.join(", ")
+                        )
+                    }
+                    _ => bail!("no binding for host {host}"),
+                }
+            }
+            _ => {
+                let envs: Vec<&str> = indexes
+                    .iter()
+                    .map(|i| self.bindings[*i].env.as_deref().unwrap_or("default"))
+                    .collect();
+                bail!(
+                    "host {host} is bound for more than one env ({}); pass --env",
+                    envs.join(", ")
+                )
+            }
+        }
+    }
+
+    /// One line for `secret ls`. It names ages, never the value.
+    pub fn age_label(&self, now: i64) -> String {
+        let Some(rotated) = self.rotated_at else {
+            return "age unknown".to_string();
+        };
+        let age = age_secs(rotated, now);
+        let mut line = format!("rotated {}", format_age(age));
+        if let Some(max) = self.max_age_secs {
+            if age >= max {
+                line.push_str(&format!(", overdue (max age {})", format_span(max)));
+            } else {
+                line.push_str(&format!(", max age {}", format_span(max)));
+            }
+        }
+        line
+    }
+
+    /// Set when this secret is past its max age. The text names `name`, never the value.
+    pub fn overdue_warning(&self, name: &str, now: i64) -> Option<String> {
+        let max = self.max_age_secs?;
+        let rotated = self.rotated_at?;
+        let age = age_secs(rotated, now);
+        if age < max {
+            return None;
+        }
+        Some(format!(
+            "{name} is overdue for rotation ({} old, max age {})",
+            format_span_floored(age),
+            format_span(max)
+        ))
+    }
+}
+
+fn age_secs(rotated_at: i64, now: i64) -> u64 {
+    u64::try_from(now.saturating_sub(rotated_at).max(0)).unwrap_or(u64::MAX)
+}
+
+/// `90d`, `12h`, `30m`, `45s`, `2w`. Zero is refused: a max age of nothing
+/// would warn on every run.
+pub fn parse_duration(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (num, unit) = text.split_at(split);
+    if num.is_empty() || unit.is_empty() {
+        bail!("duration {text:?}: use a number and a unit, such as 90d, 12h or 30m");
+    }
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("duration {text:?}: number is too large"))?;
+    if n == 0 {
+        bail!("duration {text:?}: must be at least 1");
+    }
+    let factor: u64 = match unit.to_ascii_lowercase().as_str() {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 60 * 60 * 24,
+        "w" => 60 * 60 * 24 * 7,
+        _ => bail!("duration {text:?}: unit must be s, m, h, d or w"),
+    };
+    n.checked_mul(factor)
+        .ok_or_else(|| anyhow::anyhow!("duration {text:?}: too long"))
+}
+
+pub fn now_unix() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .unwrap_or(0)
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        "just now".to_string()
+    } else {
+        format!("{} ago", format_span_floored(secs))
+    }
+}
+
+/// The configured span, which divides evenly into the unit it was given as.
+fn format_span(secs: u64) -> String {
+    if secs.is_multiple_of(86400) {
+        format!("{}d", secs / 86400)
+    } else if secs.is_multiple_of(3600) {
+        format!("{}h", secs / 3600)
+    } else if secs.is_multiple_of(60) {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+fn format_span_floored(secs: u64) -> String {
+    if secs >= 86400 {
+        format!("{}d", secs / 86400)
+    } else if secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
     }
 }
 
@@ -459,6 +622,8 @@ mod tests {
         let mut entry = SecretEntry {
             value: "REAL".into(),
             bindings: vec![bind("api.example.com", None)],
+            rotated_at: None,
+            max_age_secs: None,
         };
         entry
             .add_binding(bind("staging.example.com", Some("staging")))
@@ -468,7 +633,8 @@ mod tests {
             .add_binding(bind("evil.example.com", None))
             .unwrap_err();
         assert!(
-            err.to_string().contains("api.example.com for env default"),
+            err.to_string().contains("api.example.com for env default")
+                && err.to_string().contains("hush secret unbind"),
             "{err}"
         );
         let err = entry
@@ -493,6 +659,8 @@ mod tests {
                     Binding::new(host.into(), env.map(Into::into), None, None, false)
                 })
                 .collect(),
+            rotated_at: None,
+            max_age_secs: None,
         }
     }
 
@@ -502,6 +670,8 @@ mod tests {
         let vault: Vault = serde_json::from_str(old).unwrap();
         assert!(vault.profiles.is_empty());
         assert_eq!(vault.secrets["OPENAI_API_KEY"].value, "REAL");
+        assert_eq!(vault.secrets["OPENAI_API_KEY"].rotated_at, None);
+        assert_eq!(vault.secrets["OPENAI_API_KEY"].max_age_secs, None);
         assert_eq!(serde_json::to_string(&vault).unwrap(), old);
     }
 
@@ -645,5 +815,78 @@ mod tests {
         // the descriptor, and so the lock, until its exec closes it.
         open_lock_file(&path).unwrap().lock().unwrap();
         fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn rotation_fields_load_and_an_old_secret_has_no_age() {
+        let json = r#"{"secrets":{"K":{"value":"super-secret-value","bindings":[],"rotated_at":1000,"max_age_secs":86400}}}"#;
+        let vault: Vault = serde_json::from_str(json).unwrap();
+        let stored = &vault.secrets["K"];
+        assert_eq!(stored.rotated_at, Some(1000));
+        assert_eq!(stored.max_age_secs, Some(86400));
+        assert_eq!(
+            stored.age_label(1000 + 3 * 86400),
+            "rotated 3d ago, overdue (max age 1d)"
+        );
+        let warning = stored.overdue_warning("K", 1000 + 3 * 86400).unwrap();
+        assert!(warning.contains("K is overdue"), "{warning}");
+        assert!(!warning.contains("super-secret-value"), "{warning}");
+        assert!(stored.overdue_warning("K", 1000 + 3600).is_none());
+
+        let unknown = entry("V", &[]);
+        assert_eq!(unknown.age_label(1_700_000_000), "age unknown");
+        assert!(unknown.overdue_warning("V", 1_700_000_000).is_none());
+    }
+
+    #[test]
+    fn durations_use_a_unit_and_refuse_zero() {
+        assert_eq!(parse_duration("90d").unwrap(), 90 * 86400);
+        assert_eq!(parse_duration("12h").unwrap(), 12 * 3600);
+        assert_eq!(parse_duration("30m").unwrap(), 30 * 60);
+        assert_eq!(parse_duration("45s").unwrap(), 45);
+        assert_eq!(parse_duration("2w").unwrap(), 14 * 86400);
+        assert_eq!(parse_duration(" 2D ").unwrap(), 2 * 86400);
+        for bad in ["", "90", "0d", "0", "d", "-1d", "1x", "999999999999999999d"] {
+            assert!(parse_duration(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn unbind_removes_one_host_and_asks_when_several_envs_share_it() {
+        let bind = |host: &str, env: Option<&str>| {
+            Binding::new(host.into(), env.map(Into::into), None, None, false)
+        };
+        let mut entry = entry("super-secret-value", &[]);
+        entry.bindings = vec![
+            bind("api.example.com", None),
+            bind("api.example.com", Some("staging")),
+            bind("other.example.com", None),
+        ];
+        let err = entry.remove_binding("API.example.com", None).unwrap_err();
+        assert!(err.to_string().contains("pass --env"), "{err}");
+        assert!(!err.to_string().contains("super-secret-value"), "{err}");
+        assert_eq!(entry.bindings.len(), 3);
+
+        entry
+            .remove_binding("api.example.com", Some("staging"))
+            .unwrap();
+        let hosts: Vec<_> = entry
+            .bindings
+            .iter()
+            .map(|b| (b.host.as_str(), b.env.as_deref()))
+            .collect();
+        assert_eq!(
+            hosts,
+            [("api.example.com", None), ("other.example.com", None),]
+        );
+
+        let err = entry
+            .remove_binding("api.example.com", Some("nope"))
+            .unwrap_err();
+        assert!(err.to_string().contains("env default"), "{err}");
+        entry.remove_binding("other.example.com", None).unwrap();
+        entry.remove_binding("api.example.com", None).unwrap();
+        assert!(entry.bindings.is_empty());
+        assert!(entry.remove_binding("api.example.com", None).is_err());
     }
 }

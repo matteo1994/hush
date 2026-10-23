@@ -32,6 +32,8 @@ pub struct Minted {
     pub unmatched: Vec<String>,
     /// Names bound to this machine by name or without a port, never sent.
     pub unusable_loopback: Vec<String>,
+    /// Secrets past their max age. The text names the secret, never the value.
+    pub overdue: Vec<String>,
 }
 
 /// Mints a fresh placeholder for each requested name that has a binding for
@@ -43,10 +45,15 @@ pub fn mint(vault: &Vault, names: &[String], profile: Option<&str>, env: Option<
         placeholders: HashMap::new(),
         unmatched: Vec::new(),
         unusable_loopback: Vec::new(),
+        overdue: Vec::new(),
     };
+    let now = vault::now_unix();
     for name in names {
         match vault.find_binding(name, profile, env) {
             Some((entry, binding)) => {
+                if let Some(warning) = entry.overdue_warning(name, now) {
+                    minted.overdue.push(warning);
+                }
                 let placeholder = generate_placeholder();
                 let (host, port) = binding.host_and_port();
                 if vault::unusable_loopback(&host, port) {
@@ -159,6 +166,9 @@ pub fn run(
         eprintln!(
             "hush: warning: {name} is bound to this machine without an address and port, so it is never sent; add it again with --host 127.0.0.1:PORT or [::1]:PORT"
         );
+    }
+    for warning in &minted.overdue {
+        eprintln!("hush: warning: {warning}");
     }
     if minted.table.is_empty() {
         return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None));
@@ -315,6 +325,8 @@ mod tests {
                         false,
                     ),
                 ],
+                rotated_at: None,
+                max_age_secs: None,
             },
         );
         v.secrets.insert(
@@ -328,6 +340,8 @@ mod tests {
                     None,
                     false,
                 )],
+                rotated_at: None,
+                max_age_secs: None,
             },
         );
         v
@@ -346,6 +360,8 @@ mod tests {
                 SecretEntry {
                     value: "REAL".to_string(),
                     bindings: vec![Binding::new(host.into(), None, None, None, false)],
+                    rotated_at: None,
+                    max_age_secs: None,
                 },
             );
         }
@@ -390,6 +406,33 @@ mod tests {
             (entry.header.as_str(), entry.format.as_str()),
             ("Authorization", "Bearer {value}")
         );
+        assert!(m.overdue.is_empty());
+    }
+
+    #[test]
+    fn mint_warns_when_a_secret_is_overdue_and_never_names_the_value() {
+        let mut v = vault();
+        {
+            let entry = v.secrets.get_mut("BILLING_API_KEY").unwrap();
+            entry.value = "super-secret-value".into();
+            entry.rotated_at = Some(1_000);
+            entry.max_age_secs = Some(86_400);
+        }
+        let names = ["BILLING_API_KEY".to_string()];
+        let m = mint(&v, &names, None, None);
+        assert!(
+            m.overdue.len() == 1 && m.overdue[0].contains("BILLING_API_KEY is overdue"),
+            "{:?}",
+            m.overdue
+        );
+        assert!(
+            !m.overdue[0].contains("super-secret-value"),
+            "{}",
+            m.overdue[0]
+        );
+
+        v.secrets.get_mut("BILLING_API_KEY").unwrap().max_age_secs = None;
+        assert!(mint(&v, &names, None, None).overdue.is_empty());
     }
 
     #[test]
@@ -416,6 +459,8 @@ mod tests {
                     None,
                     false,
                 )],
+                rotated_at: None,
+                max_age_secs: None,
             },
         );
         let names = ["BILLING_API_KEY".into(), "UNUSED_KEY".into()];
@@ -449,6 +494,8 @@ mod tests {
                         false,
                     ),
                 ],
+                rotated_at: None,
+                max_age_secs: None,
             },
         );
         let names = ["BILLING_API_KEY".to_string()];
