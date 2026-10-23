@@ -114,9 +114,9 @@ fn profiles_hold_their_own_entries_next_to_the_unprofiled_ones() {
     let all = home.ok(&["secret", "ls"]);
     assert_eq!(
         all,
-        "GITHUB_KEY\n  [default] host=api.github.com header=Authorization format=\"Bearer {value}\"\n\
-         OPENAI_API_KEY\n  [default] host=api.openai.com header=Authorization format=\"Bearer {value}\"\n\
-         OPENAI_API_KEY (profile acme)\n  [default] host=acme.openai.azure.com header=Authorization format=\"Bearer {value}\"\n  \
+        "GITHUB_KEY\n  rotated just now\n  [default] host=api.github.com header=Authorization format=\"Bearer {value}\"\n\
+         OPENAI_API_KEY\n  rotated just now\n  [default] host=api.openai.com header=Authorization format=\"Bearer {value}\"\n\
+         OPENAI_API_KEY (profile acme)\n  rotated just now\n  [default] host=acme.openai.azure.com header=Authorization format=\"Bearer {value}\"\n  \
          [staging] host=staging.openai.azure.com header=Authorization format=\"Bearer {value}\"\n"
     );
     // What a run with acme gets: acme's OPENAI_API_KEY, the shared GITHUB_KEY.
@@ -561,4 +561,113 @@ fn passwd_reencrypts_and_leaves_the_old_vault_on_failure() {
         "{listed}"
     );
     assert!(!listed.contains("REAL"), "{listed}");
+}
+
+#[test]
+fn ls_shows_age_and_a_max_age_can_be_cleared() {
+    let home = Home::new("age");
+    let err = home.fails(&[
+        "secret",
+        "add",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--max-age",
+        "90",
+    ]);
+    assert!(err.contains("duration"), "{err}");
+    assert!(!err.contains("REAL"), "{err}");
+    assert!(!home.ok(&["secret", "ls"]).contains("KEY"), "{err}");
+
+    home.ok(&[
+        "secret",
+        "add",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--max-age",
+        "90d",
+    ]);
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(ls.contains("rotated just now, max age 90d"), "{ls}");
+    assert!(!ls.contains("REAL"), "{ls}");
+
+    home.ok(&["secret", "set", "KEY", "--max-age", "none"]);
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(ls.contains("rotated just now\n"), "{ls}");
+    assert!(!ls.contains("max age"), "{ls}");
+
+    // Setting the value without --max-age leaves the limit that was stored.
+    home.ok(&["secret", "set", "KEY", "--max-age", "12h"]);
+    home.ok(&["secret", "set", "KEY"]);
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(ls.contains("rotated just now, max age 12h"), "{ls}");
+}
+
+#[test]
+fn unbind_removes_one_binding_and_keeps_the_secret() {
+    let home = Home::new("unbind");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    home.ok(&[
+        "secret",
+        "bind",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--env",
+        "staging",
+    ]);
+    home.ok(&[
+        "secret",
+        "bind",
+        "KEY",
+        "--host",
+        "other.example.com",
+        "--env",
+        "qa",
+    ]);
+
+    let err = home.fails(&["secret", "bind", "KEY", "--host", "evil.example.com"]);
+    assert!(err.contains("hush secret unbind"), "{err}");
+    assert!(!err.contains("REAL"), "{err}");
+
+    let err = home.fails(&["secret", "unbind", "KEY", "--host", "api.example.com"]);
+    assert!(err.contains("pass --env"), "{err}");
+    assert!(home.ok(&["secret", "ls"]).contains("[staging]"), "{err}");
+
+    home.ok(&[
+        "secret",
+        "unbind",
+        "KEY",
+        "--host",
+        "API.example.com",
+        "--env",
+        "staging",
+    ]);
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(ls.contains("[default] host=api.example.com"), "{ls}");
+    assert!(!ls.contains("staging"), "{ls}");
+    assert!(ls.contains("other.example.com"), "{ls}");
+    assert!(!ls.contains("REAL"), "{ls}");
+
+    home.ok(&["secret", "unbind", "KEY", "--host", "other.example.com"]);
+    let out = home.hush(&["secret", "unbind", "KEY", "--host", "api.example.com"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no bindings left"), "{stderr}");
+    assert!(!stderr.contains("REAL"), "{stderr}");
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(ls.contains("KEY\n"), "{ls}");
+    assert!(!ls.contains("host="), "{ls}");
+
+    let err = home.fails(&[
+        "secret",
+        "unbind",
+        "KEY",
+        "--host",
+        "api.example.com",
+        "--profile",
+        "acme",
+    ]);
+    assert!(err.contains("no such secret: KEY in profile acme"), "{err}");
 }
