@@ -136,7 +136,13 @@ hush secret set BILLING_API_KEY --profile acme  # that profile's entry only
 
 It fails if the name isn't in the vault yet, and says to add it. The placeholder a child sees is random per run, so nothing on the agent side has to change.
 
-A running `hush run` keeps the value it read at startup and keeps sending that key. Restart it after rotating.
+```bash
+hush secret set BILLING_API_KEY --keep-old 7d
+```
+
+`--keep-old` keeps the previous value for that long so responses can still be redacted, and then the next command that writes the vault drops it. The old value is never sent. Without the flag, hush forgets the previous value immediately: a host that echoes it after the rotation can hand it to the child. The window is opt-in on purpose. The usual reason to rotate is that the old value may already be compromised, and keeping it in the vault and in every `hush run` would be the wrong default.
+
+A running `hush run` keeps sending the value it read at startup, and keeps redacting any retired value it loaded then. Restart it after rotating.
 
 ```bash
 hush passwd    # current passphrase, then the new one twice
@@ -170,7 +176,7 @@ Found a way around it? See [SECURITY.md](SECURITY.md) for how to report it priva
 
 **The per-run CA** can mint a certificate for any host, and the `hush run` child trusts it. Its key never leaves `hush run`'s memory and stops existing when the run ends, so this adds nothing an attacker could steal from disk. Anything that can read that memory could already read the secrets themselves. The CA files in the run directory are public certificates only.
 
-**A bound host that echoes the key back**, such as a request-inspection endpoint like postman-echo or an error message that quotes it, is mostly covered. hush asks bound hosts for uncompressed responses (`Accept-Encoding: identity`) and replaces every real value in their response headers and body with a same-length `HUSH_REDACTED***` marker. That only catches the value as it was sent. A server that compresses anyway, escapes or re-encodes the key (base64, JSON `\u` escapes), echoes part of it, or splits it across chunk boundaries or responses still leaks it. Only bind hosts you trust with the key.
+**A bound host that echoes the key back**, such as a request-inspection endpoint like postman-echo or an error message that quotes it, is mostly covered. hush asks bound hosts for uncompressed responses (`Accept-Encoding: identity`) and replaces every real value in their response headers and body with a same-length `HUSH_REDACTED***` marker. A rotation with `secret set --keep-old` keeps redacting the previous value until that window ends; without it, the next run forgets the old value and a host that still echoes it can show it to the child. The old value is never sent either way. That only catches the value as it was sent. A server that compresses anyway, escapes or re-encodes the key (base64, JSON `\u` escapes), echoes part of it, or splits it across chunk boundaries or responses still leaks it. Only bind hosts you trust with the key.
 
 **A key that gets another key.** hush keeps the child from reading the key, not from using it: every request the child sends to the bound host carries the real value, so the child can do anything the key allows there. With many vendor APIs that includes creating a new API key, exchanging the key for an OAuth or session token, or reading back a stored credential. The new credential comes back in an ordinary response, and the redaction above only knows the values in the vault, so the child gets it in full and can send it anywhere. Where the vendor offers one, bind a restricted key: limited to the endpoints the work needs, unable to create or manage keys, and with a spending or rate limit if there is one.
 

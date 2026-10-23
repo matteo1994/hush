@@ -61,6 +61,10 @@ pub fn mint(vault: &Vault, names: &[String], profile: Option<&str>, env: Option<
                         header: binding.header.clone(),
                         format: binding.format.clone(),
                         allow_http: binding.allow_http,
+                        // Expired ones are left out here, so a run started
+                        // after the window does not scrub them even when the
+                        // vault has not been written since.
+                        retired: entry.live_retired(vault::now_unix()),
                     },
                 );
                 minted.placeholders.insert(name.clone(), placeholder);
@@ -315,6 +319,7 @@ mod tests {
                         false,
                     ),
                 ],
+                retired: Vec::new(),
             },
         );
         v.secrets.insert(
@@ -328,6 +333,7 @@ mod tests {
                     None,
                     false,
                 )],
+                retired: Vec::new(),
             },
         );
         v
@@ -346,6 +352,7 @@ mod tests {
                 SecretEntry {
                     value: "REAL".to_string(),
                     bindings: vec![Binding::new(host.into(), None, None, None, false)],
+                    retired: Vec::new(),
                 },
             );
         }
@@ -361,6 +368,38 @@ mod tests {
             (ported.host.as_str(), ported.port),
             ("127.0.0.1", Some(3000))
         );
+    }
+
+    #[test]
+    fn mint_redacts_a_live_retired_value_and_drops_an_expired_one() {
+        let mut v = Vault::new();
+        v.secrets.insert(
+            "BILLING_API_KEY".into(),
+            SecretEntry {
+                value: "NEW".into(),
+                bindings: vec![Binding::new(
+                    "api.example.com".into(),
+                    None,
+                    None,
+                    None,
+                    false,
+                )],
+                retired: vec![
+                    vault::Retired {
+                        value: "OLD".into(),
+                        until: i64::MAX,
+                    },
+                    vault::Retired {
+                        value: "GONE".into(),
+                        until: 0,
+                    },
+                ],
+            },
+        );
+        let minted = mint(&v, &["BILLING_API_KEY".into()], None, None);
+        let entry = minted.table.values().next().unwrap();
+        assert_eq!(entry.real_value, "NEW");
+        assert_eq!(entry.retired, ["OLD".to_string()]);
     }
 
     #[test]
@@ -416,6 +455,7 @@ mod tests {
                     None,
                     false,
                 )],
+                retired: Vec::new(),
             },
         );
         let names = ["BILLING_API_KEY".into(), "UNUSED_KEY".into()];
@@ -449,6 +489,7 @@ mod tests {
                         false,
                     ),
                 ],
+                retired: Vec::new(),
             },
         );
         let names = ["BILLING_API_KEY".to_string()];
