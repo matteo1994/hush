@@ -31,7 +31,12 @@ fn every_prompt_inside_hush_run_warns() {
     let init = hush(&home, &["init"], &[("HUSH_PASSPHRASE", "pw")]);
     assert!(init.status.success(), "{init:?}");
 
-    for args in [&["secret", "ls"][..], &["secret", "rm", "X"]] {
+    for args in [
+        &["secret", "ls"][..],
+        &["secret", "rm", "X"],
+        &["secret", "set", "X"],
+        &["passwd"],
+    ] {
         let inside = hush(&home, args, &[("HUSH_ACTIVE", "1")]);
         let stderr = String::from_utf8_lossy(&inside.stderr);
         assert!(stderr.contains("WARNING"), "{args:?}: {stderr}");

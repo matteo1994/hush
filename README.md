@@ -21,7 +21,7 @@ An AI coding agent that needs to call a billing/payments/whatever API needs the 
 
 ## How it works
 
-- **`hush secret add NAME --host HOST`**: register a secret and the one host it may be injected into. The binding lives with the secret in the vault, which is encrypted on disk (age, passphrase-based). Every vault change asks for the passphrase and shows what it's about to change first. Adding a name that already exists asks before replacing it (`--force` skips the question), and a secret gets at most one binding per environment. Vault changes take a lock, so two running at once can't lose each other's edits.
+- **`hush secret add NAME --host HOST`**: register a secret and the one host it may be injected into. The binding lives with the secret in the vault, which is encrypted on disk (age, passphrase-based). Every vault change asks for the passphrase and shows what it's about to change first. Adding a name that already exists asks before replacing it (`--force` skips the question), and a secret gets at most one binding per environment. Vault changes take a lock, so two running at once can't lose each other's edits. To change only the value, see [Rotating a key](#rotating-a-key).
 - **`hush run -- CMD...`**: asks for the passphrase and decrypts only the secrets the project's `.env` names. It then starts a loopback proxy inside itself and runs `CMD` as its child, with a random placeholder in place of each real value. `CMD`'s environment never contains the real bytes. When `CMD` makes a request through the proxy, `hush run` swaps the placeholder for the real value *on the wire*, but only if the request is going to that secret's bound host. A request to any other host gets the placeholder forwarded verbatim: no error, no side channel, just a normal auth failure from whatever it hit. When `CMD` exits, the decrypted secrets go with it.
 
 That last part is the actual security property: even if an agent is prompt-injected into sending "the Authorization header" to an attacker's endpoint, there's nothing to send — the agent never had the real value, and the proxy refuses to hand it to an unauthorized destination.
@@ -107,7 +107,9 @@ hush secret bind BILLING_API_KEY --host billing-staging.internal --env staging -
 hush secret bind BILLING_API_KEY --host 127.0.0.1:3000 --env dev  # a local dev server
 
 hush secret ls                              # list names + bindings, never values
+hush secret set BILLING_API_KEY             # new value, same bindings (see Rotating a key)
 hush secret rm BILLING_API_KEY
+hush passwd                                 # change the vault passphrase
 
 # A different key under the same name for one project (see Profiles)
 hush secret add BILLING_API_KEY --host api.acme.example --profile acme
@@ -122,6 +124,26 @@ hush run --profile acme -- ./deploy.sh      # one run with acme, wherever it sta
 hush run -- claude                          # a coding agent and everything it starts
 ```
 
+## Rotating a key
+
+`hush secret add NAME --force` replaces the value and drops every binding, so each host has to be bound again. `hush secret set` replaces only the value:
+
+```bash
+hush secret set BILLING_API_KEY                 # prompts for the new value, hidden
+hush secret set BILLING_API_KEY --stdin         # one value from stdin; the trailing newline is removed
+hush secret set BILLING_API_KEY --profile acme  # that profile's entry only
+```
+
+It fails if the name isn't in the vault yet, and says to add it. The placeholder a child sees is random per run, so nothing on the agent side has to change.
+
+A running `hush run` keeps the value it read at startup and keeps sending that key. Restart it after rotating.
+
+```bash
+hush passwd    # current passphrase, then the new one twice
+```
+
+`hush passwd` re-encrypts the vault under the new passphrase, writing it the same way as any other save (a temporary file, renamed into place, owner-only permissions). An empty or mismatched new passphrase is refused, and the vault file is left as it was.
+
 ## Current scope (v0)
 
 - **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, not HTTP/2. A client that keeps its connection open gets one upstream connection for as long as it does, so repeated requests skip the TLS handshake; plain HTTP is still one request per connection. WebSocket upgrades to a bound host aren't supported.
@@ -135,7 +157,7 @@ Found a way around it? See [SECURITY.md](SECURITY.md) for how to report it priva
 
 **What this protects against:** an AI agent (or anything running as your own user) that reads env vars, inspects config files, or is prompt-injected into printing or exfiltrating "the API key" — because the real bytes are never in its reachable process tree in the first place. Also protects the value at rest: the vault file is encrypted, so directly reading it gets ciphertext.
 
-**Changing where a secret may go needs the passphrase.** `secret add`/`bind`/`rm` decrypt and rewrite the vault themselves, so a process started by `hush run` can't rebind a secret to a host it controls. It never has the passphrase, and `hush run` strips `HUSH_PASSPHRASE` and `HUSH_SECRET_VALUE` from its environment. Run from inside `hush run`, any hush command that prompts, `secret ls` too, first prints a warning: a command the agent started shares the terminal with it, and the agent can read what you type. Only type the passphrase for a command you started yourself.
+**Changing a secret, where it may go, or the vault passphrase needs the passphrase.** `secret add`/`set`/`bind`/`rm` and `passwd` decrypt and rewrite the vault themselves, so a process started by `hush run` can't rebind a secret to a host it controls or replace its value. It never has the passphrase, and `hush run` strips `HUSH_PASSPHRASE`, `HUSH_NEW_PASSPHRASE` and `HUSH_SECRET_VALUE` from its environment. Run from inside `hush run`, any hush command that prompts, `secret ls` too, first prints a warning: a command the agent started shares the terminal with it, and the agent can read what you type. Only type the passphrase for a command you started yourself.
 
 **Reading `hush run`'s memory.** The decrypted values live in `hush run`'s memory for as long as its command runs, and the command runs as the same user. Left alone, a same-user process could get them out: on macOS `lldb -p <pid>` attaches to `hush run` without a prompt and can save a core holding every value; on Linux `/proc/<pid>/mem` and ptrace are open to the same user unless Yama restricts them, and even then the child can raise hush's core limit (`prlimit`), kill it with SIGABRT and read the dump with `coredumpctl`. So every hush command shuts that off for itself before anything is decrypted. On Linux it makes itself non-dumpable (`PR_SET_DUMPABLE`), which closes ptrace, `/proc/<pid>/mem` and core dumps to the same user. On macOS it refuses debugger attach (`PT_DENY_ATTACH`) and sets its core-dump limit to 0; the child gets back the limit hush started with, and stays debuggable itself. That doesn't stop root. On macOS it also doesn't stop a program allowed to take another process's task port, which needs Developer Mode or `DevToolsSecurity -enable` and reads memory without attaching; signing hush with the hardened runtime refuses those too: `sudo codesign -f -s - -o runtime "$(command -v hush)"`, again after each install (see *Installing*). Real isolation (separate OS user, container, sandboxed agent execution) still strengthens this further and is complementary, not required.
 
@@ -154,7 +176,7 @@ Found a way around it? See [SECURITY.md](SECURITY.md) for how to report it priva
 
 **Profiles are not a boundary between projects.** They choose which key a run gets, not who may have it. All profiles live in one vault behind one passphrase, and a run you start with `--profile` from any directory gets that profile's keys; `.env` and the directory map only decide what a run gets by default. What a run's child can reach is still only the keys that run minted, each going only to its bound host. A child can't change which profile later runs use, since the map is in the vault. If a project's agent must never be able to reach another project's keys, a profile isn't enough: use a separate OS user, with its own vault.
 
-**Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
+**Automation escape hatches** (`HUSH_PASSPHRASE`, `HUSH_NEW_PASSPHRASE`, `HUSH_SECRET_VALUE` env vars, used instead of the interactive hidden prompt) exist for scripting/testing. `HUSH_NEW_PASSPHRASE` is the new passphrase for `hush passwd`, read for both the new value and its confirmation. `HUSH_SECRET_VALUE` supplies the value for `secret add` and `secret set`; `secret set --stdin` reads stdin instead, and ignores that variable. They're less safe than the interactive prompt — the value becomes visible in the process environment — so avoid them for anything beyond local automation you control.
 
 ## Installing
 

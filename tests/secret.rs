@@ -1,6 +1,8 @@
 //! `hush secret` with `--profile`, through the built binary and a vault in a
 //! throwaway home.
 
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -23,7 +25,7 @@ impl Home {
         self.hush_in(&self.0, args)
     }
 
-    fn hush_in(&self, dir: &Path, args: &[&str]) -> Output {
+    fn command_in(&self, dir: &Path, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_hush"));
         // SAFETY: setsid is async-signal-safe.
         unsafe {
@@ -39,9 +41,16 @@ impl Home {
             .env("HOME", &self.0)
             .env("HUSH_PASSPHRASE", "pw")
             .env("HUSH_SECRET_VALUE", "REAL")
-            .stdin(Stdio::null())
-            .output()
-            .unwrap()
+            .stdin(Stdio::null());
+        cmd
+    }
+
+    fn hush_in(&self, dir: &Path, args: &[&str]) -> Output {
+        self.command_in(dir, args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        self.command_in(&self.0, args)
     }
 
     /// stdout of a command that must succeed.
@@ -347,4 +356,145 @@ fn profile_use_maps_the_project_and_ls_lists_the_mappings() {
             .status
             .success()
     );
+}
+
+#[test]
+fn set_keeps_bindings_and_refuses_an_unknown_name() {
+    let home = Home::new("set");
+    let err = home.fails(&["secret", "set", "MISSING"]);
+    assert!(
+        err.contains("no such secret: MISSING")
+            && err.contains("hush secret add MISSING --host HOST"),
+        "{err}"
+    );
+    assert!(!err.contains("REAL"), "{err}");
+
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    home.ok(&[
+        "secret",
+        "bind",
+        "KEY",
+        "--host",
+        "staging.example.com",
+        "--env",
+        "staging",
+    ]);
+    let out = home.hush(&["secret", "set", "KEY"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stderr.contains("keeping its bindings"), "{stderr}");
+    assert!(
+        stderr.contains("host=api.example.com") && stderr.contains("host=staging.example.com"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("REAL") && !stdout.contains("REAL"),
+        "{out:?}"
+    );
+
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(
+        ls.contains("host=api.example.com") && ls.contains("host=staging.example.com"),
+        "{ls}"
+    );
+    assert!(!ls.contains("REAL"), "{ls}");
+
+    let err = home.fails(&["secret", "set", "KEY", "--profile", "acme"]);
+    assert!(
+        err.contains("no such secret: KEY in profile acme") && err.contains("--profile acme"),
+        "{err}"
+    );
+    // The unprofiled entry is untouched by the failed profile set.
+    assert!(home.ok(&["secret", "ls"]).contains("host=api.example.com"));
+}
+
+#[test]
+fn set_stdin_does_not_echo_the_value() {
+    let home = Home::new("set-stdin");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    let value = "stdin-secret-value\n";
+    let mut cmd = home.command(&["secret", "set", "KEY", "--stdin"]);
+    cmd.env("HUSH_SECRET_VALUE", "NOT-THE-STDIN-VALUE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(value.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stderr).unwrap() + &String::from_utf8(out.stdout).unwrap();
+    assert!(!text.contains("stdin-secret-value"), "{text}");
+    assert!(!text.contains("NOT-THE-STDIN-VALUE"), "{text}");
+}
+
+#[test]
+fn passwd_reencrypts_and_leaves_the_old_vault_on_failure() {
+    let home = Home::new("passwd");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    let path = home.0.join(".config/hush/vault.age");
+    let before = std::fs::read(&path).unwrap();
+
+    let fail = |pass: &str, new: &str| {
+        let mut cmd = home.command(&["passwd"]);
+        cmd.env("HUSH_PASSPHRASE", pass)
+            .env("HUSH_NEW_PASSPHRASE", new);
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{pass:?} {new:?}: {out:?}");
+        String::from_utf8(out.stderr).unwrap()
+    };
+    let err = fail("nope", "pw2");
+    assert!(err.contains("wrong passphrase"), "{err}");
+    assert!(!err.contains("nope") && !err.contains("pw2"), "{err}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "a rejected passphrase rewrote the vault"
+    );
+
+    let err = fail("pw", "");
+    assert!(err.contains("must not be empty"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    let mut cmd = home.command(&["passwd"]);
+    cmd.env("HUSH_PASSPHRASE", "pw")
+        .env("HUSH_NEW_PASSPHRASE", "a-new-passphrase");
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8(out.stderr).unwrap() + &String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("vault passphrase changed"), "{text}");
+    assert!(!text.contains("a-new-passphrase"), "{text}");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+    assert!(!path.with_extension("age.tmp").exists());
+    assert_ne!(std::fs::read(&path).unwrap(), before);
+
+    let mut ls = home.command(&["secret", "ls"]);
+    ls.env("HUSH_PASSPHRASE", "pw");
+    let out = ls.output().unwrap();
+    assert!(
+        !out.status.success(),
+        "old passphrase still opens the vault: {out:?}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("a-new-passphrase"),
+        "{out:?}"
+    );
+
+    let mut ls = home.command(&["secret", "ls"]);
+    ls.env("HUSH_PASSPHRASE", "a-new-passphrase");
+    let out = ls.output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let listed = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        listed.contains("KEY") && listed.contains("host=api.example.com"),
+        "{listed}"
+    );
+    assert!(!listed.contains("REAL"), "{listed}");
 }
