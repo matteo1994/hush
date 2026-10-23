@@ -16,9 +16,13 @@ use crate::vault::{self, Vault};
 /// Set in the child's environment so a nested `hush run` can tell it's inside one.
 pub const ACTIVE_VAR: &str = "HUSH_ACTIVE";
 
-/// hush's own inputs. They must never reach the child: `HUSH_PASSPHRASE`
-/// in particular would let it decrypt the vault directly.
-const SCRUBBED_VARS: &[&str] = &["HUSH_PASSPHRASE", "HUSH_SECRET_VALUE"];
+/// hush's own inputs. They must never reach the child: a passphrase would
+/// let it decrypt the vault directly.
+const SCRUBBED_VARS: &[&str] = &[
+    "HUSH_PASSPHRASE",
+    "HUSH_NEW_PASSPHRASE",
+    "HUSH_SECRET_VALUE",
+];
 
 pub struct Minted {
     /// placeholder → what to swap it for, and where.
@@ -478,6 +482,7 @@ mod tests {
         [
             ("PATH", "/usr/bin"),
             ("HUSH_PASSPHRASE", "hunter2"),
+            ("HUSH_NEW_PASSPHRASE", "hunter3"),
             ("HUSH_SECRET_VALUE", "sk-live"),
             ("BILLING_API_KEY", "whatever-the-shell-had"),
         ]
@@ -497,6 +502,7 @@ mod tests {
         let env = child_env(parent(), &placeholders, Some((4242, &trust)));
 
         assert!(!env.contains_key("HUSH_PASSPHRASE"));
+        assert!(!env.contains_key("HUSH_NEW_PASSPHRASE"));
         assert!(!env.contains_key("HUSH_SECRET_VALUE"));
         assert_eq!(env["PATH"], "/usr/bin");
         assert_eq!(
@@ -548,6 +554,7 @@ mod tests {
     fn child_env_without_proxy_still_scrubs() {
         let env = child_env(parent(), &HashMap::new(), None);
         assert!(!env.contains_key("HUSH_PASSPHRASE"));
+        assert!(!env.contains_key("HUSH_NEW_PASSPHRASE"));
         assert!(!env.contains_key("HTTPS_PROXY"));
         assert_eq!(env[ACTIVE_VAR], "1");
     }
