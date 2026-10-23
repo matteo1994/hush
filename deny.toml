@@ -4,4 +4,15 @@
 [advisories]
 # Each ignored advisory gets an entry here with the reason it doesn't reach
 # hush, and is dropped again once an upgrade fixes it.
-ignore = []
+ignore = [
+    # basic-toml 0.1.10 is unmaintained (repo archived 2025-03-02; RUSTSEC
+    # lists no patched versions) and the suggested replacement is the `toml`
+    # crate, which nothing here depends on yet. It arrives only through age
+    # 0.12.1's localization macros: i18n-embed-fl and i18n-embed-impl are
+    # proc-macros, and i18n-config uses basic-toml to parse that crate's own
+    # Cargo.toml and i18n.toml while age is compiled. The parser is not linked
+    # into the hush binary and never sees input hush receives. age, i18n-embed,
+    # i18n-embed-fl and i18n-config are already at their latest crates.io
+    # releases. Drop this once one of them stops depending on basic-toml.
+    { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's i18n proc macros; no patched release" },
+]
