@@ -133,6 +133,10 @@ enum SecretAction {
         /// newline is removed; the rest, spaces included, is the value.
         #[arg(long)]
         stdin: bool,
+        /// Keep redacting the previous value for this long (for example `7d`
+        /// or `12h`). It is never sent. Without this, the next run forgets it.
+        #[arg(long, value_name = "DURATION")]
+        keep_old: Option<String>,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -283,11 +287,11 @@ fn cmd_passwd() -> Result<ExitCode> {
     eprintln!("changing the vault passphrase");
     let old = passphrase()?;
     let _lock = vault::lock_vault()?;
-    let vault = vault::load_vault(&old)?;
+    let mut vault = vault::load_vault(&old)?;
     let new = read_secret("New passphrase: ", "HUSH_NEW_PASSPHRASE")?;
     let confirm = read_secret("Confirm passphrase: ", "HUSH_NEW_PASSPHRASE")?;
     check_new_passphrase(&new, &confirm)?;
-    vault::save_vault(&vault, &new)?;
+    vault::save_vault(&mut vault, &new)?;
     println!("vault passphrase changed");
     Ok(ExitCode::SUCCESS)
 }
@@ -362,20 +366,34 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 vault::SecretEntry {
                     value,
                     bindings: vec![binding],
+                    retired: Vec::new(),
                 },
             );
-            vault::save_vault(&v, &pass)?;
+            vault::save_vault(&mut v, &pass)?;
         }
         SecretAction::Set {
             name,
             stdin,
+            keep_old,
             profile,
         } => {
             let profile = profile_arg(profile.as_deref())?;
+            // Before the passphrase, so a bad duration changes nothing and
+            // doesn't consume a value waiting on stdin.
+            let keep_for = match keep_old.as_deref() {
+                Some(text) => Some(vault::parse_duration(text)?),
+                None => None,
+            };
             eprintln!(
                 "replacing the value of {name}{}, keeping its bindings",
                 in_profile(profile)
             );
+            if let Some(text) = keep_old.as_deref() {
+                eprintln!(
+                    "the previous value of {name} will be redacted from responses for {}, then dropped; it is never sent",
+                    text.trim()
+                );
+            }
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
@@ -392,11 +410,15 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             } else {
                 read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?
             };
+            let now = vault::now_unix();
             let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
                 return Err(no_such_secret(&name, profile));
             };
+            if let Some(secs) = keep_for {
+                entry.retire_current(&value, vault::until_unix(now, secs), now);
+            }
             entry.value = value;
-            vault::save_vault(&v, &pass)?;
+            vault::save_vault_at(&mut v, &pass, now)?;
         }
         SecretAction::Bind {
             name,
@@ -424,7 +446,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             entry
                 .add_binding(binding)
                 .map_err(|e| anyhow!("{name} is {e}"))?;
-            vault::save_vault(&v, &pass)?;
+            vault::save_vault(&mut v, &pass)?;
         }
         SecretAction::Rm { name, profile } => {
             let profile = profile_arg(profile.as_deref())?;
@@ -445,7 +467,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                     );
                 }
             }
-            vault::save_vault(&v, &pass)?;
+            vault::save_vault(&mut v, &pass)?;
         }
         SecretAction::Ls { profile } => {
             let profile = profile_arg(profile.as_deref())?;
@@ -480,7 +502,11 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                     Some(p) => println!("{name} (profile {p})"),
                     None => println!("{name}"),
                 }
-                for b in &v.secrets_in(p).expect("listed from it")[name].bindings {
+                let entry = &v.secrets_in(p).expect("listed from it")[name];
+                if let Some(line) = entry.retired_label(vault::now_unix()) {
+                    println!("  {line}");
+                }
+                for b in &entry.bindings {
                     println!("  {}", describe(b));
                 }
             }
@@ -540,7 +566,7 @@ fn cmd_profile(action: ProfileAction) -> Result<ExitCode> {
                     }
                 }
             }
-            vault::save_vault(&v, &pass)?;
+            vault::save_vault(&mut v, &pass)?;
         }
         ProfileAction::Ls => {
             let v = vault::load_vault(&passphrase()?)?;

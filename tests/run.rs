@@ -78,6 +78,12 @@ impl Drop for Home {
 /// An HTTP server on this machine that answers every request with the
 /// request's own head, and sends that head to the receiver too.
 fn upstream() -> (u16, Receiver<String>) {
+    upstream_echoing(String::new())
+}
+
+/// Like `upstream`, and the response body continues with `extra`, so a
+/// server can echo a value the request did not carry.
+fn upstream_echoing(extra: String) -> (u16, Receiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::channel();
@@ -94,9 +100,10 @@ fn upstream() -> (u16, Receiver<String>) {
                 head.push_str(&line);
             }
             let _ = tx.send(head.clone());
+            let body = format!("{head}{extra}");
             let reply = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{head}",
-                head.len()
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
             );
             let _ = stream.write_all(reply.as_bytes());
         }
@@ -522,6 +529,170 @@ fn secret_set_stdin_is_what_the_next_run_sends() {
         String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap();
     assert!(!child_out.contains(VIA_STDIN), "{child_out}");
     assert!(!child_out.contains(REAL), "{child_out}");
+}
+
+fn set_value(home: &Home, args: &[&str], value: &str) -> Output {
+    let mut cmd = home.hush(args);
+    cmd.env("HUSH_SECRET_VALUE", value);
+    let out = cmd.output().unwrap();
+    assert!(out.status.success(), "{cmd:?}: {out:?}");
+    out
+}
+
+fn no_values(text: &str, values: &[&str]) {
+    for value in values {
+        assert!(!text.contains(value), "{value} in: {text}");
+    }
+}
+
+/// `--keep-old` redacts the previous value and never sends it. Without the
+/// flag the next run forgets it, so an echo of it reaches the child.
+#[test]
+fn a_retired_value_is_scrubbed_and_an_old_one_is_not_sent() {
+    const FIRST: &str = "sk-retire-first-0123456789ab";
+    const SECOND: &str = "sk-retire-second-0123456789a";
+    const THIRD: &str = "sk-retire-third-0123456789ab";
+    let values = [REAL, FIRST, SECOND, THIRD];
+    let (port, rx) = upstream_echoing(format!(
+        "\nleak:{REAL}\nleak:{FIRST}\nleak:{SECOND}\nleak:{THIRD}\n"
+    ));
+    let home = Home::with_key("retire", port);
+
+    let fetch = || {
+        let script = format!(r#"{CURL} "http://127.0.0.1:$BOUND/""#);
+        let out = home.ok(home.run(&script, &[("BOUND", port.to_string())]));
+        (
+            received(&rx),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+
+    set_value(&home, &["secret", "set", "DEMO_KEY"], FIRST);
+    let (at, stdout, stderr) = fetch();
+    assert!(at.contains(&format!("Bearer {FIRST}\r\n")), "{at}");
+    assert!(!at.contains(REAL), "the old value was sent: {at}");
+    // No --keep-old: the host can still hand the previous value to the child.
+    assert!(stdout.contains(REAL), "{stdout}");
+    no_values(&stdout, &[FIRST]);
+    no_values(&stderr, &values);
+
+    let out = set_value(
+        &home,
+        &["secret", "set", "DEMO_KEY", "--keep-old", "7d"],
+        SECOND,
+    );
+    let set_err = String::from_utf8(out.stderr).unwrap();
+    assert!(set_err.contains("for 7d"), "{set_err}");
+    assert!(set_err.contains("never sent"), "{set_err}");
+    no_values(&set_err, &values);
+    no_values(&String::from_utf8(out.stdout).unwrap(), &values);
+
+    let (at, stdout, stderr) = fetch();
+    assert!(at.contains(&format!("Bearer {SECOND}\r\n")), "{at}");
+    assert!(!at.contains(FIRST), "the retired value was sent: {at}");
+    assert!(!at.contains(REAL), "{at}");
+    no_values(&stdout, &[FIRST, SECOND]);
+    assert!(stdout.contains(REAL), "{stdout}");
+    assert!(stdout.contains("HUSH_REDACTED"), "{stdout}");
+    no_values(&stderr, &values);
+
+    let listed = String::from_utf8(home.ok(home.hush(&["secret", "ls"])).stdout).unwrap();
+    assert!(
+        listed.contains("1 previous value still redacted"),
+        "{listed}"
+    );
+    assert!(listed.contains("127.0.0.1"), "{listed}");
+    no_values(&listed, &values);
+
+    set_value(
+        &home,
+        &["secret", "set", "DEMO_KEY", "--keep-old", "7d"],
+        THIRD,
+    );
+    let (at, stdout, stderr) = fetch();
+    assert!(at.contains(&format!("Bearer {THIRD}\r\n")), "{at}");
+    assert!(!at.contains(SECOND), "the retired value was sent: {at}");
+    assert!(!at.contains(FIRST), "an older retired value was sent: {at}");
+    no_values(&stdout, &[FIRST, SECOND, THIRD]);
+    assert!(stdout.contains(REAL), "{stdout}");
+    no_values(&stderr, &values);
+
+    let listed = String::from_utf8(home.ok(home.hush(&["secret", "ls"])).stdout).unwrap();
+    assert!(
+        listed.contains("2 previous values still redacted"),
+        "{listed}"
+    );
+    no_values(&listed, &values);
+}
+
+/// After the grace period a run no longer redacts the previous value, and a
+/// later write drops it.
+#[test]
+fn an_expired_retired_value_is_not_scrubbed() {
+    const OLD: &str = "sk-grace-old-0123456789abcdef";
+    const NEW: &str = "sk-grace-new-0123456789abcdef";
+    let (port, rx) = upstream_echoing(format!("\nleak:{OLD}\n"));
+    let home = Home::with_key("grace", port);
+    set_value(&home, &["secret", "set", "DEMO_KEY"], OLD);
+    let out = set_value(
+        &home,
+        &["secret", "set", "DEMO_KEY", "--keep-old", "1s"],
+        NEW,
+    );
+    let set_err = String::from_utf8(out.stderr).unwrap();
+    assert!(set_err.contains("for 1s"), "{set_err}");
+    no_values(&set_err, &[OLD, NEW, REAL]);
+
+    thread::sleep(Duration::from_secs(3));
+    let script = format!(r#"{CURL} "http://127.0.0.1:$BOUND/""#);
+    let out = home.ok(home.run(&script, &[("BOUND", port.to_string())]));
+    let at = received(&rx);
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert!(at.contains(&format!("Bearer {NEW}\r\n")), "{at}");
+    assert!(!at.contains(OLD), "the expired value was sent: {at}");
+    assert!(
+        stdout.contains(OLD),
+        "an expired value was still scrubbed: {stdout}"
+    );
+    no_values(&stdout, &[NEW]);
+    no_values(&stderr, &[OLD, NEW, REAL]);
+
+    let listed = String::from_utf8(home.ok(home.hush(&["secret", "ls"])).stdout).unwrap();
+    assert!(!listed.contains("previous value"), "{listed}");
+    no_values(&listed, &[OLD, NEW, REAL]);
+
+    // A different env: the secret already has its unscoped binding, and a
+    // write here is what drops an expired retired value.
+    home.ok(home.hush(&[
+        "secret",
+        "bind",
+        "DEMO_KEY",
+        "--host",
+        "127.0.0.1:9",
+        "--env",
+        "other",
+    ]));
+    let listed = String::from_utf8(home.ok(home.hush(&["secret", "ls"])).stdout).unwrap();
+    assert!(!listed.contains("previous value"), "{listed}");
+    assert!(listed.contains("[other] host=127.0.0.1:9 "), "{listed}");
+    no_values(&listed, &[OLD, NEW, REAL]);
+}
+
+#[test]
+fn a_bad_keep_old_does_not_change_the_vault() {
+    let home = Home::with_key("keep-old-bad", 9);
+    let path = home.0.join(".config/hush/vault.age");
+    let before = std::fs::read(&path).unwrap();
+    let mut cmd = home.hush(&["secret", "set", "DEMO_KEY", "--keep-old", "nope"]);
+    cmd.env("HUSH_SECRET_VALUE", "SHOULD-NOT-BE-STORED");
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unit"), "{err}");
+    no_values(&err, &["SHOULD-NOT-BE-STORED", REAL]);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 fn wait_for(path: &Path) {
