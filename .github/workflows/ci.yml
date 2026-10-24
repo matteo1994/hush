@@ -14,9 +14,13 @@ permissions:
 
 concurrency:
   # The event is part of the group, so a scheduled run on master never
-  # cancels a push run there, and with it a release.
+  # cancels a push run there, and with it a release. Only a pull request's
+  # runs are cancelled by a newer push: on master that could stop a bump
+  # between its commit and its push, or, since the release push starts CI
+  # too, cancel the run that has just released. Runs there queue instead,
+  # and bump-version.sh leaves a run that master has passed to the newer one.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,23 +68,36 @@ jobs:
 
   # Every merge to master that changes the program gets its own patch
   # version, a CHANGELOG.md entry and a `v<version>` tag, once lint and tests
-  # pass. The push uses GITHUB_TOKEN, which doesn't trigger workflows, so the
-  # release commit can't start another release.
+  # pass. Master's ruleset only lets a pull request change it, and a personal
+  # repository can't list GitHub Actions as a bypass actor, so the release is
+  # pushed with a deploy key (secret RELEASE_DEPLOY_KEY) that the ruleset lets
+  # through. That push starts CI again on the release commit, whose bump finds
+  # nothing changed since the new tag and stops.
   bump:
     name: bump version
     needs: [lint, test]
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     # One at a time, and never cancelled by another bump.
     concurrency:
       group: bump-version
     steps:
+      - name: Check for the deploy key
+        env:
+          KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::RELEASE_DEPLOY_KEY is not set, so the release can't be pushed past master's ruleset"
+            exit 1
+          fi
       - uses: actions/checkout@v5
         with:
           # Full history, so the existing tags are there to compare against.
           fetch-depth: 0
+          # This key bypasses master's ruleset, and checkout leaves it in the
+          # git config for the steps after it. Keep this job to checkout and
+          # bump-version.sh: no third-party actions, no cargo build.
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
