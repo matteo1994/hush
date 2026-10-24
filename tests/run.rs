@@ -524,6 +524,96 @@ fn secret_set_stdin_is_what_the_next_run_sends() {
     assert!(!child_out.contains(REAL), "{child_out}");
 }
 
+#[test]
+fn an_overdue_secret_is_named_and_its_value_is_not() {
+    const VALUE: &str = "sk-overdue-0123456789abcdef";
+    let (bound, rx) = upstream();
+    let home = Home::with_key("overdue", bound);
+    let script = format!(r#"{CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+    let run = || {
+        let out = home.ok(home.run(&script, &[("BOUND", bound.to_string())]));
+        (
+            received(&rx),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+
+    let mut set = home.hush(&["secret", "set", "DEMO_KEY", "--max-age", "90d"]);
+    set.env("HUSH_SECRET_VALUE", VALUE);
+    home.ok(set);
+    let (at, stdout, stderr) = run();
+    assert!(at.contains(&format!("Bearer {VALUE}\r\n")), "{at}");
+    assert!(!at.contains(REAL), "{at}");
+    assert!(!stderr.contains("overdue"), "{stderr}");
+    assert!(
+        !stderr.contains(VALUE) && !stdout.contains(VALUE),
+        "{stderr}"
+    );
+
+    let mut set = home.hush(&["secret", "set", "DEMO_KEY", "--max-age", "1s"]);
+    set.env("HUSH_SECRET_VALUE", VALUE);
+    home.ok(set);
+    thread::sleep(Duration::from_secs(2));
+    let (at, stdout, stderr) = run();
+    assert!(stderr.contains("DEMO_KEY is overdue"), "{stderr}");
+    assert!(stderr.contains("max age 1s"), "{stderr}");
+    assert!(
+        !stderr.contains(VALUE) && !stdout.contains(VALUE),
+        "{stderr}{stdout}"
+    );
+    assert!(at.contains(&format!("Bearer {VALUE}\r\n")), "{at}");
+    assert!(!at.contains(REAL), "the previous value was sent: {at}");
+}
+
+#[test]
+fn an_unbound_host_is_not_sent_the_key() {
+    const OTHER: &str = "sk-other-0123456789abcdef";
+    let (bound, rx) = upstream();
+    let home = Home::with_key("unbind-run", bound);
+    let host = format!("127.0.0.1:{bound}");
+    let mut add = home.hush(&["secret", "add", "OTHER_KEY", "--host", &host]);
+    add.env("HUSH_SECRET_VALUE", OTHER);
+    home.ok(add);
+    home.ok(home.hush(&["secret", "unbind", "DEMO_KEY", "--host", &host]));
+
+    let script =
+        format!(r#"printf '%s\n' "$DEMO_KEY"; {CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+    let mut cmd = home.hush(&[
+        "run",
+        "--secret",
+        "DEMO_KEY",
+        "--secret",
+        "OTHER_KEY",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ]);
+    cmd.env("BOUND", bound.to_string());
+    let out = home.ok(cmd);
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(
+        stderr.contains("DEMO_KEY has no matching binding"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(REAL) && !stdout.contains(REAL),
+        "{stderr}{stdout}"
+    );
+    assert!(
+        !stderr.contains(OTHER) && !stdout.contains(OTHER),
+        "{stderr}{stdout}"
+    );
+    let at = received(&rx);
+    assert!(!at.contains(REAL), "the unbound key was sent: {at}");
+    assert!(
+        !at.contains(OTHER),
+        "the other key was sent on DEMO_KEY's request: {at}"
+    );
+}
+
 fn wait_for(path: &Path) {
     let start = Instant::now();
     while !path.exists() {

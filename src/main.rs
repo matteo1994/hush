@@ -122,6 +122,10 @@ enum SecretAction {
         /// asking first. To replace only the value, use `secret set`.
         #[arg(long)]
         force: bool,
+        /// Warn from `hush run` once the value is older than this (`90d`,
+        /// `12h`, `30m`). The clock starts when the value is set.
+        #[arg(long, value_name = "DURATION")]
+        max_age: Option<String>,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -133,6 +137,21 @@ enum SecretAction {
         /// newline is removed; the rest, spaces included, is the value.
         #[arg(long)]
         stdin: bool,
+        /// Warn from `hush run` once the value is older than this (`90d`,
+        /// `12h`, `30m`), or `none` to clear a limit. Omit to leave it.
+        #[arg(long, value_name = "DURATION")]
+        max_age: Option<String>,
+        /// Work on this profile's entries instead of the unprofiled ones.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+    /// Remove one host binding from a secret.
+    Unbind {
+        name: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        env: Option<String>,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -163,9 +182,10 @@ enum SecretAction {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
-    /// List secret names and their bindings (never values), and the profile
-    /// of each. With --profile, what a run with that profile gets: its own
-    /// entries and the unprofiled ones it doesn't replace.
+    /// List secret names, how old each value is, and their bindings (never
+    /// the values), and the profile of each. With --profile, what a run with
+    /// that profile gets: its own entries and the unprofiled ones it doesn't
+    /// replace.
     Ls {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -292,6 +312,14 @@ fn cmd_passwd() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `90d`, or `none` to store no limit. Checked before the passphrase prompt.
+fn parse_max_age(text: &str) -> Result<Option<u64>> {
+    if text.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    Ok(Some(vault::parse_duration(text)?))
+}
+
 fn no_such_secret(name: &str, profile: Option<&str>) -> anyhow::Error {
     let profile_flag = match profile {
         Some(p) => format!(" --profile {p}"),
@@ -317,10 +345,15 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             format,
             allow_http,
             force,
+            max_age,
             profile,
         } => {
             let profile = profile_arg(profile.as_deref())?;
             vault::check_host(&host)?;
+            let max_age_secs = match &max_age {
+                Some(text) => parse_max_age(text)?,
+                None => None,
+            };
             let binding = Binding::new(host, env, header, format, allow_http);
             let replacing = if force {
                 ", replacing it if it exists"
@@ -332,6 +365,12 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 in_profile(profile),
                 describe(&binding)
             );
+            if max_age_secs.is_some() {
+                eprintln!(
+                    "hush run will warn once {name} is older than {}",
+                    max_age.as_deref().unwrap_or_default()
+                );
+            }
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
@@ -362,6 +401,8 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 vault::SecretEntry {
                     value,
                     bindings: vec![binding],
+                    rotated_at: Some(vault::now_unix()),
+                    max_age_secs,
                 },
             );
             vault::save_vault(&v, &pass)?;
@@ -369,9 +410,15 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
         SecretAction::Set {
             name,
             stdin,
+            max_age,
             profile,
         } => {
             let profile = profile_arg(profile.as_deref())?;
+            // `None` means leave the stored limit alone; `Some(None)` clears it.
+            let max_age_secs = match &max_age {
+                Some(text) => Some(parse_max_age(text)?),
+                None => None,
+            };
             // Typed at a terminal, the value would echo, stay in the
             // scrollback, and be readable by an agent sharing the terminal.
             if stdin && std::io::stdin().is_terminal() {
@@ -383,6 +430,13 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 "replacing the value of {name}{}, keeping its bindings",
                 in_profile(profile)
             );
+            if let Some(text) = &max_age {
+                if text.eq_ignore_ascii_case("none") {
+                    eprintln!("clearing the max age of {name}");
+                } else {
+                    eprintln!("hush run will warn once {name} is older than {text}");
+                }
+            }
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
@@ -408,6 +462,39 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 return Err(no_such_secret(&name, profile));
             };
             entry.value = value;
+            entry.rotated_at = Some(vault::now_unix());
+            if let Some(max_age_secs) = max_age_secs {
+                entry.max_age_secs = max_age_secs;
+            }
+            vault::save_vault(&v, &pass)?;
+        }
+        SecretAction::Unbind {
+            name,
+            host,
+            env,
+            profile,
+        } => {
+            let profile = profile_arg(profile.as_deref())?;
+            let env_for = env
+                .as_deref()
+                .map(|e| format!(" and env {e}"))
+                .unwrap_or_default();
+            eprintln!(
+                "removing the binding of {name}{} for host {host}{env_for}",
+                in_profile(profile)
+            );
+            let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
+            let mut v = vault::load_vault(&pass)?;
+            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
+                bail!("no such secret: {name}{}", in_profile(profile))
+            };
+            entry
+                .remove_binding(&host, env.as_deref())
+                .map_err(|e| anyhow!("{name}: {e}"))?;
+            if entry.bindings.is_empty() {
+                eprintln!("{name} has no bindings left, so `hush run` will not inject it");
+            }
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Bind {
@@ -487,12 +574,15 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                     .collect(),
             };
             listed.sort();
+            let now = vault::now_unix();
             for (p, name) in listed {
                 match p {
                     Some(p) => println!("{name} (profile {p})"),
                     None => println!("{name}"),
                 }
-                for b in &v.secrets_in(p).expect("listed from it")[name].bindings {
+                let entry = &v.secrets_in(p).expect("listed from it")[name];
+                println!("  {}", entry.age_label(now));
+                for b in &entry.bindings {
                     println!("  {}", describe(b));
                 }
             }

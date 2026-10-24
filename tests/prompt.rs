@@ -35,6 +35,7 @@ fn every_prompt_inside_hush_run_warns() {
         &["secret", "ls"][..],
         &["secret", "rm", "X"],
         &["secret", "set", "X"],
+        &["secret", "unbind", "X", "--host", "example.com"],
         &["passwd"],
     ] {
         let inside = hush(&home, args, &[("HUSH_ACTIVE", "1")]);
