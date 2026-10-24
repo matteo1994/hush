@@ -148,16 +148,23 @@ impl SecretEntry {
 
     /// Drops the one binding for `host`. Without `env`, a host bound for a
     /// single env is that one; a host bound for several needs `--env`, so
-    /// the wrong one isn't the one that goes.
+    /// the wrong one isn't the one that goes. `default`, the name errors and
+    /// `add_binding` give a binding without an env, picks that one, unless an
+    /// env is really called that.
     pub fn remove_binding(&mut self, host: &str, env: Option<&str>) -> Result<()> {
         let host_matches = |b: &Binding| b.host.eq_ignore_ascii_case(host);
-        let indexes: Vec<usize> = self
-            .bindings
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| host_matches(b) && env.is_none_or(|e| b.env.as_deref() == Some(e)))
-            .map(|(i, _)| i)
-            .collect();
+        let select = |env_matches: &dyn Fn(&Binding) -> bool| -> Vec<usize> {
+            self.bindings
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| host_matches(b) && env_matches(b))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let mut indexes = select(&|b| env.is_none_or(|e| b.env.as_deref() == Some(e)));
+        if indexes.is_empty() && env == Some("default") {
+            indexes = select(&|b| b.env.is_none());
+        }
         match indexes.as_slice() {
             [index] => {
                 self.bindings.remove(*index);
@@ -186,7 +193,7 @@ impl SecretEntry {
                     .map(|i| self.bindings[*i].env.as_deref().unwrap_or("default"))
                     .collect();
                 bail!(
-                    "host {host} is bound for more than one env ({}); pass --env",
+                    "host {host} is bound for more than one env ({}); pass --env, with `default` for the binding without one",
                     envs.join(", ")
                 )
             }
@@ -866,6 +873,15 @@ mod tests {
         assert!(err.to_string().contains("pass --env"), "{err}");
         assert!(!err.to_string().contains("super-secret-value"), "{err}");
         assert_eq!(entry.bindings.len(), 3);
+
+        // `default` is how the binding without an env is shown, and how it
+        // is picked out from the others on the same host.
+        let mut unscoped = entry.clone();
+        unscoped
+            .remove_binding("api.example.com", Some("default"))
+            .unwrap();
+        let envs: Vec<_> = unscoped.bindings.iter().map(|b| b.env.as_deref()).collect();
+        assert_eq!(envs, [Some("staging"), None]);
 
         entry
             .remove_binding("api.example.com", Some("staging"))
