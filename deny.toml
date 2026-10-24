@@ -15,4 +15,12 @@ ignore = [
     # i18n-embed-fl and i18n-config are already at their latest crates.io
     # releases. Drop this once one of them stops depending on basic-toml.
     { id = "RUSTSEC-2026-0374", reason = "compile-time only, via age's i18n proc macros; no patched release" },
+    # crypto-bigint 0.5.5 has branches in operations meant to be constant
+    # time. It comes in through elliptic-curve and p256, which age 0.12.1
+    # always builds for its P-256 tag recipients (`age1tag`, hardware keys)
+    # and hpke. hush only encrypts and decrypts with a scrypt passphrase
+    # (vault.rs), so no P-256 arithmetic runs on anything secret. The fix is
+    # crypto-bigint 0.7.6, which elliptic-curve 0.13 can't use. Drop this
+    # once age moves to an elliptic-curve release built on it.
+    { id = "RUSTSEC-2026-0387", reason = "P-256 code in age that hush's scrypt-only use never calls; fix only in crypto-bigint 0.7" },
 ]
