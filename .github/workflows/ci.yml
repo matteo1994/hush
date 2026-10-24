@@ -14,9 +14,13 @@ permissions:
 
 concurrency:
   # The event is part of the group, so a scheduled run on master never
-  # cancels a push run there, and with it a release.
+  # cancels a push run there, and with it a release. Only a pull request's
+  # runs are cancelled by a newer push: on master that could stop a bump
+  # between its commit and its push, or, since the release push starts CI
+  # too, cancel the run that has just released. Runs there queue instead,
+  # and bump-version.sh leaves a run that master has passed to the newer one.
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -90,6 +94,9 @@ jobs:
         with:
           # Full history, so the existing tags are there to compare against.
           fetch-depth: 0
+          # This key bypasses master's ruleset, and checkout leaves it in the
+          # git config for the steps after it. Keep this job to checkout and
+          # bump-version.sh: no third-party actions, no cargo build.
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
       - run: |
           git config user.name "github-actions[bot]"
