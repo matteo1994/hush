@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.22 (2026-10-24)
+
+- Rotate a secret's value in place, and change the vault passphrase (#43)
+
 ## 0.1.21 (2026-10-24)
 
 - Scrub echoed secrets across chunks and encodings; reject unscannable bodies (#42)
