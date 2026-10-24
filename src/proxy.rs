@@ -22,6 +22,9 @@ pub struct PlaceholderEntry {
     pub header: String,
     pub format: String,
     pub allow_http: bool,
+    /// Previous values to redact from responses. Substitution never sends
+    /// these; only `real_value` is swapped in.
+    pub retired: Vec<String>,
 }
 
 pub type PlaceholderTable = Arc<Mutex<HashMap<String, PlaceholderEntry>>>;
@@ -1603,13 +1606,18 @@ fn split_host_port(authority: &str, default_port: u16) -> (String, u16) {
     (host.to_string(), port)
 }
 
+/// Live values plus any still inside their grace period. The scrubber
+/// redacts both, in every encoding it knows; substitution reads `real_value`
+/// on its own, so this list is the only place a retired value meets the
+/// response path.
 fn real_values(table: &PlaceholderTable) -> Vec<String> {
-    table
-        .lock()
-        .unwrap()
-        .values()
-        .map(|e| e.real_value.clone())
-        .collect()
+    let table = table.lock().unwrap();
+    let mut values = Vec::new();
+    for entry in table.values() {
+        values.push(entry.real_value.clone());
+        values.extend(entry.retired.iter().cloned());
+    }
+    values
 }
 
 /// Whether some placeholder may be swapped on the way to `target`. Only
@@ -1850,6 +1858,7 @@ mod tests {
             header: "Authorization".to_string(),
             format: "Bearer {value}".to_string(),
             allow_http,
+            retired: Vec::new(),
         };
         Arc::new(Mutex::new(HashMap::from([(
             PLACEHOLDER.to_string(),
@@ -2175,6 +2184,29 @@ mod tests {
         }
         out.extend(scrubber.finish());
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_retired_value_is_scrubbed_and_never_substituted() {
+        let table = table_bound_to("api.example.com");
+        table.lock().unwrap().get_mut(PLACEHOLDER).unwrap().retired = vec!["OLD-SECRET".into()];
+        let sent = swapped(&table, &remote("api.example.com"), &auth_headers());
+        assert_eq!(sent, "Bearer REAL");
+
+        // The child sending the old bytes itself is not hush injecting them.
+        let mut headers = vec![("authorization".into(), "Bearer OLD-SECRET".into())];
+        substitute_placeholders(&mut headers, &remote("api.example.com"), &table);
+        assert_eq!(headers[0].1, "Bearer OLD-SECRET");
+
+        // Redacted like a live value, encoded forms included.
+        let values = real_values(&table);
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        let echo = "echo OLD-SECRET, REAL and T0xELVNFQ1JFVA==";
+        let redacted = scrub_in_pieces(&refs, &[echo]);
+        assert!(!redacted.contains("OLD-SECRET"), "{redacted}");
+        assert!(!redacted.contains("REAL"), "{redacted}");
+        assert!(!redacted.contains("T0xELVNFQ1JFVA=="), "{redacted}");
+        assert!(redacted.contains("HUSH"), "{redacted}");
     }
 
     #[test]
