@@ -386,6 +386,144 @@ fn run_dirs_are_removed_and_dead_ones_swept() {
     assert!(alive.exists(), "a live pid's directory was swept");
 }
 
+/// The value `secret set` wrote is what the next run sends. The run that was
+/// already going is a different process and is not what this checks: a run
+/// keeps the value it read at startup.
+#[test]
+fn a_rotated_value_is_what_the_next_run_sends() {
+    const NEW: &str = "sk-rotated-0123456789abcdef";
+    const ACME_OLD: &str = "sk-acme-old-0123456789abcd";
+    const ACME: &str = "sk-acme-rotated-0123456789";
+    let (bound, rx) = upstream();
+    let home = Home::with_key("rotate", bound);
+    let host = format!("127.0.0.1:{bound}");
+    let mut add = home.hush(&[
+        "secret",
+        "add",
+        "DEMO_KEY",
+        "--host",
+        &host,
+        "--profile",
+        "acme",
+    ]);
+    add.env("HUSH_SECRET_VALUE", ACME_OLD);
+    home.ok(add);
+
+    let script =
+        format!(r#"printf '%s\n' "$DEMO_KEY"; {CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+    let fetch = |profile: Option<&str>| {
+        let mut args = vec!["run"];
+        if let Some(profile) = profile {
+            args.extend(["--profile", profile]);
+        }
+        args.extend(["--secret", "DEMO_KEY", "--", "sh", "-c", &script]);
+        let mut cmd = home.hush(&args);
+        cmd.env("BOUND", bound.to_string());
+        let out = home.ok(cmd);
+        (
+            received(&rx),
+            String::from_utf8(out.stdout).unwrap(),
+            String::from_utf8(out.stderr).unwrap(),
+        )
+    };
+    let quiet = |stdout: &str, stderr: &str, values: &[&str]| {
+        for value in values {
+            assert!(!stdout.contains(value), "{value} in stdout: {stdout}");
+            assert!(!stderr.contains(value), "{value} in stderr: {stderr}");
+        }
+    };
+
+    let (at, stdout, stderr) = fetch(None);
+    assert!(at.contains(&format!("Bearer {REAL}\r\n")), "{at}");
+    quiet(&stdout, &stderr, &[REAL]);
+    assert!(stdout.starts_with("hush_ph_"), "{stdout}");
+
+    let mut set = home.hush(&["secret", "set", "DEMO_KEY"]);
+    set.env("HUSH_SECRET_VALUE", NEW);
+    let out = home.ok(set);
+    quiet(
+        &String::from_utf8(out.stdout).unwrap(),
+        &String::from_utf8(out.stderr).unwrap(),
+        &[NEW, REAL],
+    );
+
+    let (at, stdout, stderr) = fetch(None);
+    assert!(at.contains(&format!("Bearer {NEW}\r\n")), "{at}");
+    assert!(!at.contains(REAL), "the old value was sent: {at}");
+    quiet(&stdout, &stderr, &[NEW, REAL]);
+
+    // Setting the unprofiled entry leaves the profile's value alone.
+    let (at, stdout, stderr) = fetch(Some("acme"));
+    assert!(at.contains(&format!("Bearer {ACME_OLD}\r\n")), "{at}");
+    assert!(!at.contains(NEW), "{at}");
+    quiet(&stdout, &stderr, &[ACME_OLD, NEW, REAL]);
+
+    let mut set = home.hush(&["secret", "set", "DEMO_KEY", "--profile", "acme"]);
+    set.env("HUSH_SECRET_VALUE", ACME);
+    let out = home.ok(set);
+    quiet(
+        &String::from_utf8(out.stdout).unwrap(),
+        &String::from_utf8(out.stderr).unwrap(),
+        &[ACME, ACME_OLD, NEW, REAL],
+    );
+    let (at, stdout, stderr) = fetch(Some("acme"));
+    assert!(at.contains(&format!("Bearer {ACME}\r\n")), "{at}");
+    assert!(
+        !at.contains(ACME_OLD),
+        "the profile's old value was sent: {at}"
+    );
+    quiet(&stdout, &stderr, &[ACME, ACME_OLD, NEW]);
+
+    let (at, _, _) = fetch(None);
+    assert!(at.contains(&format!("Bearer {NEW}\r\n")), "{at}");
+    assert!(!at.contains(ACME), "{at}");
+}
+
+#[test]
+fn secret_set_stdin_is_what_the_next_run_sends() {
+    const VIA_STDIN: &str = "sk-stdin-0123456789abcdef";
+    let (bound, rx) = upstream();
+    let home = Home::with_key("rotate-stdin", bound);
+    let mut cmd = home.hush(&["secret", "set", "DEMO_KEY", "--stdin"]);
+    cmd.env("HUSH_SECRET_VALUE", "SHOULD-NOT-BE-USED")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin
+            .write_all(format!("{VIA_STDIN}\n").as_bytes())
+            .unwrap();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text.contains(VIA_STDIN) && !stdout.contains(VIA_STDIN),
+        "{out:?}"
+    );
+    assert!(
+        !text.contains("SHOULD-NOT-BE-USED") && !stdout.contains("SHOULD-NOT-BE-USED"),
+        "{out:?}"
+    );
+
+    let script = format!(r#"{CURL} -o /dev/null "http://127.0.0.1:$BOUND/""#);
+    let out = home.ok(home.run(&script, &[("BOUND", bound.to_string())]));
+    let at = received(&rx);
+    assert!(at.contains(&format!("Bearer {VIA_STDIN}\r\n")), "{at}");
+    assert!(!at.contains(REAL), "the old value was sent: {at}");
+    assert!(
+        !at.contains("SHOULD-NOT-BE-USED"),
+        "stdin lost to HUSH_SECRET_VALUE: {at}"
+    );
+    let child_out =
+        String::from_utf8(out.stdout).unwrap() + &String::from_utf8(out.stderr).unwrap();
+    assert!(!child_out.contains(VIA_STDIN), "{child_out}");
+    assert!(!child_out.contains(REAL), "{child_out}");
+}
+
 fn wait_for(path: &Path) {
     let start = Instant::now();
     while !path.exists() {

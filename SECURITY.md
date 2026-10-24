@@ -30,7 +30,7 @@ These are among the known limits the threat model describes, and aren't vulnerab
 - a bound host that echoes only part of the key; splits one value across two responses, between chunk data and a trailer, or across the blank line between the headers and the body of a chunked response (a content-length or close-delimited body is one stream, so that split is caught); sends a compressed body without declaring a content encoding; or re-encodes the key in a form hush does not scan (a second layer of encoding, HTML entities, base64 broken up with whitespace, base64 of a secret shorter than 4 bytes, or base64 preceded by another base64-alphabet character, including a run that mixes `+/` with `-_`);
 - what the key itself allows at its bound host, such as creating another key;
 - profiles not separating projects from each other: one vault and one passphrase hold them all;
-- `HUSH_PASSPHRASE` and `HUSH_SECRET_VALUE` being visible to whatever can read the environment they're set in;
+- `HUSH_PASSPHRASE`, `HUSH_NEW_PASSPHRASE` and `HUSH_SECRET_VALUE` being visible to whatever can read the environment they're set in;
 - credentials hush doesn't handle: anything but a static HTTP header, such as database passwords, SSH keys or signed requests.
 
 If you're not sure whether something counts, report it anyway.

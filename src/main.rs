@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -70,6 +70,8 @@ struct Cli {
 enum Command {
     /// Create a new vault and set its passphrase.
     Init,
+    /// Change the vault passphrase.
+    Passwd,
     /// Manage secrets in the vault.
     Secret {
         #[command(subcommand)]
@@ -117,9 +119,20 @@ enum SecretAction {
         #[arg(long)]
         allow_http: bool,
         /// Replace NAME, value and bindings, if it already exists, without
-        /// asking first.
+        /// asking first. To replace only the value, use `secret set`.
         #[arg(long)]
         force: bool,
+        /// Work on this profile's entries instead of the unprofiled ones.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+    },
+    /// Replace a secret's value and keep its bindings.
+    Set {
+        name: String,
+        /// Read one value from stdin instead of prompting. A single trailing
+        /// newline is removed; the rest, spaces included, is the value.
+        #[arg(long)]
+        stdin: bool,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -197,6 +210,7 @@ fn main() -> ExitCode {
 fn dispatch(cli: Cli) -> Result<ExitCode> {
     match cli.command {
         Command::Init => cmd_init(),
+        Command::Passwd => cmd_passwd(),
         Command::Secret { action } => cmd_secret(action),
         Command::Profile { action } => cmd_profile(action),
         Command::Run {
@@ -221,27 +235,78 @@ fn passphrase() -> Result<String> {
     read_secret("Vault passphrase: ", "HUSH_PASSPHRASE")
 }
 
+/// A new passphrase for `init` or `passwd` must be confirmed and non-empty.
+/// Neither is echoed in the error.
+fn check_new_passphrase(pass: &str, confirm: &str) -> Result<()> {
+    if pass != confirm {
+        bail!("passphrases did not match");
+    }
+    if pass.is_empty() {
+        bail!("passphrase must not be empty");
+    }
+    Ok(())
+}
+
+/// One value from stdin. Only a trailing newline is removed: the value may
+/// itself contain spaces or newlines, and trimming further would change it.
+fn read_stdin_value() -> Result<String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading the value from stdin")?;
+    Ok(trim_trailing_newline(&buf).to_string())
+}
+
+fn trim_trailing_newline(buf: &str) -> &str {
+    match buf.strip_suffix('\n') {
+        Some(buf) => buf.strip_suffix('\r').unwrap_or(buf),
+        None => buf,
+    }
+}
+
 fn cmd_init() -> Result<ExitCode> {
     if vault::vault_exists()? {
         bail!("vault already exists at {}", vault::vault_path()?.display());
     }
     let pass1 = read_secret("New passphrase: ", "HUSH_PASSPHRASE")?;
     let pass2 = read_secret("Confirm passphrase: ", "HUSH_PASSPHRASE")?;
-    if pass1 != pass2 {
-        bail!("passphrases did not match");
-    }
-    if pass1.is_empty() {
-        bail!("passphrase must not be empty");
-    }
+    check_new_passphrase(&pass1, &pass2)?;
     vault::init_vault(&pass1)?;
     println!("vault created at {}", vault::vault_path()?.display());
     println!("add a secret with `hush secret add NAME --host HOST`.");
     Ok(ExitCode::SUCCESS)
 }
 
+/// Re-encrypts the vault. The new passphrase is asked for only after the
+/// current one has opened it, so a typo there doesn't collect a replacement.
+fn cmd_passwd() -> Result<ExitCode> {
+    eprintln!("changing the vault passphrase");
+    let old = passphrase()?;
+    let _lock = vault::lock_vault()?;
+    let vault = vault::load_vault(&old)?;
+    let new = read_secret("New passphrase: ", "HUSH_NEW_PASSPHRASE")?;
+    let confirm = read_secret("Confirm passphrase: ", "HUSH_NEW_PASSPHRASE")?;
+    check_new_passphrase(&new, &confirm)?;
+    vault::save_vault(&vault, &new)?;
+    println!("vault passphrase changed");
+    Ok(ExitCode::SUCCESS)
+}
+
+fn no_such_secret(name: &str, profile: Option<&str>) -> anyhow::Error {
+    let profile_flag = match profile {
+        Some(p) => format!(" --profile {p}"),
+        None => String::new(),
+    };
+    anyhow!(
+        "no such secret: {name}{}; add it with `hush secret add {name} --host HOST{profile_flag}`",
+        in_profile(profile)
+    )
+}
+
 /// Every vault change needs the passphrase, so a process started by
-/// `hush run` can't rebind a secret to a host it controls. The change is
-/// printed before the prompt so you can see what you're approving.
+/// `hush run` can't rebind a secret to a host it controls or replace its
+/// value. The change is printed before the prompt so you can see what
+/// you're approving.
 fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
     match action {
         SecretAction::Add {
@@ -299,6 +364,50 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                     bindings: vec![binding],
                 },
             );
+            vault::save_vault(&v, &pass)?;
+        }
+        SecretAction::Set {
+            name,
+            stdin,
+            profile,
+        } => {
+            let profile = profile_arg(profile.as_deref())?;
+            // Typed at a terminal, the value would echo, stay in the
+            // scrollback, and be readable by an agent sharing the terminal.
+            if stdin && std::io::stdin().is_terminal() {
+                bail!(
+                    "--stdin reads a piped value, and stdin is a terminal, where the value would echo; leave out --stdin to be prompted with the value hidden"
+                );
+            }
+            eprintln!(
+                "replacing the value of {name}{}, keeping its bindings",
+                in_profile(profile)
+            );
+            let pass = passphrase()?;
+            let _lock = vault::lock_vault()?;
+            let mut v = vault::load_vault(&pass)?;
+            {
+                let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name)) else {
+                    return Err(no_such_secret(&name, profile));
+                };
+                for b in &existing.bindings {
+                    eprintln!("  {}", describe(b));
+                }
+            }
+            let value = if stdin {
+                read_stdin_value()?
+            } else {
+                read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?
+            };
+            // An empty pipe, say from a password manager command that failed,
+            // would otherwise wipe the key.
+            if value.is_empty() {
+                bail!("the new value for {name} is empty; left it unchanged");
+            }
+            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
+                return Err(no_such_secret(&name, profile));
+            };
+            entry.value = value;
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Bind {
@@ -556,4 +665,33 @@ fn describe(b: &Binding) -> String {
         "[{env}] host={} header={} format=\"{}\"{http}",
         b.host, b.header, b.format
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_passphrase_must_be_nonempty_and_confirmed() {
+        assert!(check_new_passphrase("a", "a").is_ok());
+        let empty = check_new_passphrase("", "").unwrap_err().to_string();
+        assert!(empty.contains("must not be empty"), "{empty}");
+        let mismatch = check_new_passphrase("super-secret-new", "other-secret")
+            .unwrap_err()
+            .to_string();
+        assert!(mismatch.contains("did not match"), "{mismatch}");
+        assert!(!mismatch.contains("super-secret-new"), "{mismatch}");
+        assert!(!mismatch.contains("other-secret"), "{mismatch}");
+    }
+
+    #[test]
+    fn stdin_value_drops_one_trailing_newline() {
+        assert_eq!(trim_trailing_newline("abc\n"), "abc");
+        assert_eq!(trim_trailing_newline("abc\r\n"), "abc");
+        assert_eq!(trim_trailing_newline("abc"), "abc");
+        assert_eq!(trim_trailing_newline("a\nb\n"), "a\nb");
+        assert_eq!(trim_trailing_newline("abc\n\n"), "abc\n");
+        assert_eq!(trim_trailing_newline(" trailing \n"), " trailing ");
+        assert_eq!(trim_trailing_newline("\n"), "");
+    }
 }
