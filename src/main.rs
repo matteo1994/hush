@@ -399,6 +399,11 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             } else {
                 read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?
             };
+            // An empty pipe, say from a password manager command that failed,
+            // would otherwise wipe the key.
+            if value.is_empty() {
+                bail!("the new value for {name} is empty; left it unchanged");
+            }
             let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
                 return Err(no_such_secret(&name, profile));
             };

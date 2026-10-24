@@ -134,7 +134,7 @@ hush secret set BILLING_API_KEY --stdin         # one value from stdin; the trai
 hush secret set BILLING_API_KEY --profile acme  # that profile's entry only
 ```
 
-It fails if the name isn't in the vault yet, and says to add it. The placeholder a child sees is random per run, so nothing on the agent side has to change.
+It fails if the name isn't in the vault yet, and says to add it. An empty value, such as an empty pipe from a command that failed, is refused and the old one kept. The placeholder a child sees is random per run, so nothing on the agent side has to change.
 
 A running `hush run` keeps the value it read at startup and keeps sending that key. Restart it after rotating.
 

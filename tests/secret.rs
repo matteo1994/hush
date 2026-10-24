@@ -477,6 +477,26 @@ fn set_stdin_does_not_echo_the_value() {
     assert!(!text.contains("NOT-THE-STDIN-VALUE"), "{text}");
 }
 
+/// An empty pipe, as from a password manager command that failed, must not
+/// wipe the key.
+#[test]
+fn set_refuses_an_empty_value() {
+    let home = Home::new("set-empty");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    let vault = home.0.join(".config/hush/vault.age");
+    let before = std::fs::read(&vault).unwrap();
+    // `command` gives the child a null stdin, which reads as empty.
+    let err = home.fails(&["secret", "set", "KEY", "--stdin"]);
+    assert!(err.contains("empty; left it unchanged"), "{err}");
+    let out = home
+        .command(&["secret", "set", "KEY"])
+        .env("HUSH_SECRET_VALUE", "")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    assert_eq!(std::fs::read(&vault).unwrap(), before);
+}
+
 #[test]
 fn passwd_reencrypts_and_leaves_the_old_vault_on_failure() {
     let home = Home::new("passwd");
