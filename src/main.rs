@@ -141,6 +141,10 @@ enum SecretAction {
         /// `12h`, `30m`), or `none` to clear a limit. Omit to leave it.
         #[arg(long, value_name = "DURATION")]
         max_age: Option<String>,
+        /// Keep redacting the previous value from responses for this long
+        /// (`7d`, `12h`). It is never sent. Without this, it is forgotten.
+        #[arg(long, value_name = "DURATION")]
+        keep_old: Option<String>,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -403,6 +407,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                     bindings: vec![binding],
                     rotated_at: Some(vault::now_unix()),
                     max_age_secs,
+                    retired: Vec::new(),
                 },
             );
             vault::save_vault(&v, &pass)?;
@@ -411,12 +416,19 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             name,
             stdin,
             max_age,
+            keep_old,
             profile,
         } => {
             let profile = profile_arg(profile.as_deref())?;
             // `None` means leave the stored limit alone; `Some(None)` clears it.
             let max_age_secs = match &max_age {
                 Some(text) => Some(parse_max_age(text)?),
+                None => None,
+            };
+            // Before the passphrase, so a bad duration changes nothing and
+            // doesn't consume a value waiting on stdin.
+            let keep_for = match keep_old.as_deref() {
+                Some(text) => Some(vault::parse_duration(text)?),
                 None => None,
             };
             // Typed at a terminal, the value would echo, stay in the
@@ -436,6 +448,12 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 } else {
                     eprintln!("hush run will warn once {name} is older than {text}");
                 }
+            }
+            if let Some(text) = &keep_old {
+                eprintln!(
+                    "the previous value of {name} will be redacted from responses for {}, then dropped; it is never sent",
+                    text.trim()
+                );
             }
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
@@ -461,8 +479,12 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
                 return Err(no_such_secret(&name, profile));
             };
+            let now = vault::now_unix();
+            if let Some(secs) = keep_for {
+                entry.retire_current(&value, vault::until_unix(now, secs), now);
+            }
             entry.value = value;
-            entry.rotated_at = Some(vault::now_unix());
+            entry.rotated_at = Some(now);
             if let Some(max_age_secs) = max_age_secs {
                 entry.max_age_secs = max_age_secs;
             }
@@ -582,6 +604,9 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 }
                 let entry = &v.secrets_in(p).expect("listed from it")[name];
                 println!("  {}", entry.age_label(now));
+                if let Some(line) = entry.retired_label(now) {
+                    println!("  {line}");
+                }
                 for b in &entry.bindings {
                     println!("  {}", describe(b));
                 }

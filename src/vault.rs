@@ -129,6 +129,20 @@ pub struct SecretEntry {
     /// Absent means no limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_age_secs: Option<u64>,
+    /// Previous values still redacted from responses, never sent. Empty,
+    /// and omitted from the JSON, when there are none, so a vault from
+    /// before this still round-trips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<Retired>,
+}
+
+/// A value `secret set --keep-old` stopped sending but still redacts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retired {
+    pub value: String,
+    /// Unix seconds. Redacted while `now < until`; `load_vault` drops it after.
+    pub until: i64,
 }
 
 impl SecretEntry {
@@ -231,6 +245,60 @@ impl SecretEntry {
             format_span(max)
         ))
     }
+
+    /// Keeps the current value for response redaction until `until`. A value
+    /// equal to `new_value` is not kept twice (it is scrubbed as the live
+    /// value), and an empty one is not a secret. Leaves `self.value` empty
+    /// when it was retired; the caller stores the new value.
+    pub fn retire_current(&mut self, new_value: &str, until: i64, now: i64) {
+        self.prune_retired(now);
+        self.retired.retain(|r| r.value != new_value);
+        if !self.value.is_empty() && self.value != new_value {
+            self.retired.push(Retired {
+                value: std::mem::take(&mut self.value),
+                until,
+            });
+        }
+    }
+
+    pub fn prune_retired(&mut self, now: i64) {
+        self.retired.retain(|r| r.until > now);
+    }
+
+    /// Values a run should redact and must not send. Expired ones are omitted.
+    pub fn live_retired(&self, now: i64) -> Vec<String> {
+        self.retired
+            .iter()
+            .filter(|r| r.until > now)
+            .map(|r| r.value.clone())
+            .collect()
+    }
+
+    /// One `secret ls` line, or nothing. It counts values, it does not print them.
+    pub fn retired_label(&self, now: i64) -> Option<String> {
+        let left: Vec<u64> = self
+            .retired
+            .iter()
+            .filter(|r| r.until > now)
+            .map(|r| u64::try_from(r.until.saturating_sub(now)).unwrap_or(0))
+            .collect();
+        let soonest = *left.iter().min()?;
+        Some(match left.len() {
+            1 => format!(
+                "1 previous value still redacted for {}",
+                format_span_floored(soonest)
+            ),
+            n => format!(
+                "{n} previous values still redacted, soonest expiry {}",
+                format_span_floored(soonest)
+            ),
+        })
+    }
+}
+
+/// `now` plus `secs`, saturating so a huge duration stays inside i64.
+pub fn until_unix(now: i64, secs: u64) -> i64 {
+    now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX))
 }
 
 fn age_secs(rotated_at: i64, now: i64) -> u64 {
@@ -390,6 +458,18 @@ impl Vault {
         }
     }
 
+    /// Drops retired values whose grace period has ended, in every profile.
+    pub fn prune_retired(&mut self, now: i64) {
+        for entry in self.secrets.values_mut() {
+            entry.prune_retired(now);
+        }
+        for profile in self.profiles.values_mut() {
+            for entry in profile.secrets.values_mut() {
+                entry.prune_retired(now);
+            }
+        }
+    }
+
     /// Like `secrets_in_mut`, creating the profile if it doesn't exist.
     pub fn secrets_in_or_new(
         &mut self,
@@ -536,8 +616,12 @@ pub fn load_vault(passphrase: &str) -> Result<Vault> {
         .map_err(|_| anyhow::anyhow!("wrong passphrase or corrupted vault"))?;
     reader.read_to_end(&mut decrypted)?;
 
-    let vault: Vault = serde_json::from_slice(&decrypted)
+    let mut vault: Vault = serde_json::from_slice(&decrypted)
         .context("vault contents are not valid, or were written by a newer hush")?;
+    // An expired retired value is only bytes until the next write. Dropping
+    // it here keeps it out of every run, and out of whatever this command
+    // saves, whichever command that is.
+    vault.prune_retired(now_unix());
     Ok(vault)
 }
 
@@ -631,6 +715,7 @@ mod tests {
             bindings: vec![bind("api.example.com", None)],
             rotated_at: None,
             max_age_secs: None,
+            retired: Vec::new(),
         };
         entry
             .add_binding(bind("staging.example.com", Some("staging")))
@@ -668,6 +753,7 @@ mod tests {
                 .collect(),
             rotated_at: None,
             max_age_secs: None,
+            retired: Vec::new(),
         }
     }
 
@@ -846,6 +932,109 @@ mod tests {
     }
 
     #[test]
+    fn retiring_keeps_previous_values_until_they_expire() {
+        let mut entry = entry("A", &[("api.example.com", None)]);
+        let now = 1_700_000_000;
+        entry.retire_current("B", now + 100, now);
+        entry.value = "B".into();
+        entry.retire_current("C", now + 50, now);
+        entry.value = "C".into();
+        assert_eq!(entry.live_retired(now), ["A".to_string(), "B".to_string()]);
+
+        // Rotating back to A drops A from the retired list: it is the live value.
+        entry.retire_current("A", now + 80, now);
+        entry.value = "A".into();
+        assert_eq!(entry.live_retired(now), ["B".to_string(), "C".to_string()]);
+        let label = entry.retired_label(now).unwrap();
+        assert!(label.contains("2 previous values"), "{label}");
+        assert!(label.contains("50s"), "{label}");
+        for secret in ["A", "B", "C"] {
+            assert!(!label.contains(secret), "{secret} in {label}");
+        }
+
+        entry.prune_retired(now + 50);
+        // B's window ended at now+50; C's runs to now+80.
+        assert_eq!(entry.live_retired(now + 50), ["C".to_string()]);
+        assert!(
+            entry
+                .retired_label(now + 50)
+                .unwrap()
+                .starts_with("1 previous value")
+        );
+        entry.prune_retired(now + 100);
+        assert!(entry.live_retired(now + 100).is_empty());
+        assert!(entry.retired_label(now + 100).is_none());
+
+        // An empty value, or a set to the same value, retires nothing.
+        entry.value.clear();
+        entry.retire_current("D", now + 10, now);
+        entry.value = "D".into();
+        entry.retire_current("D", now + 10, now);
+        assert!(entry.retired.is_empty());
+        assert_eq!(entry.value, "D");
+    }
+
+    #[test]
+    fn retired_values_round_trip_and_an_old_vault_omits_them() {
+        let old = r#"{"secrets":{"K":{"value":"V","bindings":[]}}}"#;
+        let vault: Vault = serde_json::from_str(old).unwrap();
+        assert!(vault.secrets["K"].retired.is_empty());
+        assert_eq!(serde_json::to_string(&vault).unwrap(), old);
+
+        let mut stored = entry("NEW", &[]);
+        stored.retired.push(Retired {
+            value: "OLD".into(),
+            until: 99,
+        });
+        let mut vault = Vault::new();
+        vault.secrets.insert("K".into(), stored);
+        let json = serde_json::to_string(&vault).unwrap();
+        let back: Vault = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.secrets["K"].value, "NEW");
+        assert_eq!(back.secrets["K"].retired.len(), 1);
+        assert_eq!(back.secrets["K"].retired[0].until, 99);
+        assert_eq!(back.secrets["K"].retired[0].value, "OLD");
+
+        let bad = r#"{"secrets":{"K":{"value":"V","bindings":[],"retired":[{"value":"O","until":1,"extra":1}]}}}"#;
+        assert!(serde_json::from_str::<Vault>(bad).is_err(), "{bad}");
+    }
+
+    #[test]
+    fn expired_retired_values_leave_the_json_a_save_would_write() {
+        let mut vault = Vault::new();
+        let mut stored = entry("NEW", &[("api.example.com", None)]);
+        stored.retired.push(Retired {
+            value: "GONE".into(),
+            until: 10,
+        });
+        stored.retired.push(Retired {
+            value: "KEPT".into(),
+            until: 100,
+        });
+        vault
+            .profiles
+            .entry("acme".into())
+            .or_default()
+            .secrets
+            .insert("OTHER".into(), {
+                let mut e = entry("P", &[]);
+                e.retired.push(Retired {
+                    value: "PROFILE-OLD".into(),
+                    until: 10,
+                });
+                e
+            });
+        vault.secrets.insert("K".into(), stored);
+        // The same prune `load_vault` runs after it decrypts.
+        vault.prune_retired(50);
+        let json = serde_json::to_string(&vault).unwrap();
+        assert!(!json.contains("GONE"), "{json}");
+        assert!(!json.contains("PROFILE-OLD"), "{json}");
+        assert!(json.contains("KEPT"), "{json}");
+        assert!(vault.profiles["acme"].secrets["OTHER"].retired.is_empty());
+    }
+
+    #[test]
     fn durations_use_a_unit_and_refuse_zero() {
         assert_eq!(parse_duration("90d").unwrap(), 90 * 86400);
         assert_eq!(parse_duration("12h").unwrap(), 12 * 3600);
@@ -853,6 +1042,8 @@ mod tests {
         assert_eq!(parse_duration("45s").unwrap(), 45);
         assert_eq!(parse_duration("2w").unwrap(), 14 * 86400);
         assert_eq!(parse_duration(" 2D ").unwrap(), 2 * 86400);
+        assert_eq!(until_unix(10, 5), 15);
+        assert_eq!(until_unix(i64::MAX - 1, u64::MAX), i64::MAX);
         for bad in ["", "90", "0d", "0", "d", "-1d", "1x", "999999999999999999d"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
