@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.21 (2026-10-24)
+
+- Scrub echoed secrets across chunks and encodings; reject unscannable bodies (#42)
+- Push releases with a deploy key, so they get past master's ruleset. (#46)
+
 ## 0.1.20 (2026-10-20)
 
 - Add profile use, a project runs with its own profile w/o --profile (#35)
