@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -235,8 +235,8 @@ fn passphrase() -> Result<String> {
     read_secret("Vault passphrase: ", "HUSH_PASSPHRASE")
 }
 
-/// The new passphrase for `init` and `passwd`. Both prompts read the same
-/// env var when it is set, as `init` does, so a script doesn't confirm twice.
+/// A new passphrase for `init` or `passwd` must be confirmed and non-empty.
+/// Neither is echoed in the error.
 fn check_new_passphrase(pass: &str, confirm: &str) -> Result<()> {
     if pass != confirm {
         bail!("passphrases did not match");
@@ -372,6 +372,13 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             profile,
         } => {
             let profile = profile_arg(profile.as_deref())?;
+            // Typed at a terminal, the value would echo, stay in the
+            // scrollback, and be readable by an agent sharing the terminal.
+            if stdin && std::io::stdin().is_terminal() {
+                bail!(
+                    "--stdin reads a piped value, and stdin is a terminal, where the value would echo; leave out --stdin to be prompted with the value hidden"
+                );
+            }
             eprintln!(
                 "replacing the value of {name}{}, keeping its bindings",
                 in_profile(profile)

@@ -142,7 +142,7 @@ A running `hush run` keeps the value it read at startup and keeps sending that k
 hush passwd    # current passphrase, then the new one twice
 ```
 
-`hush passwd` re-encrypts the vault under the new passphrase, writing it the same way as any other save (a temporary file, renamed into place, owner-only permissions). An empty or mismatched new passphrase is refused, and the vault file is left as it was.
+`hush passwd` re-encrypts the vault under the new passphrase, writing it the same way as any other save (a temporary file, renamed into place, owner-only permissions). An empty or mismatched new passphrase is refused, and the vault file is left as it was. It changes only the file in `~/.config/hush`: a copy made before, in a backup for instance, still opens with the old passphrase and holds the same keys. If the old passphrase may have leaked, rotate the keys as well.
 
 ## Current scope (v0)
 

@@ -409,6 +409,50 @@ fn set_keeps_bindings_and_refuses_an_unknown_name() {
     assert!(home.ok(&["secret", "ls"]).contains("host=api.example.com"));
 }
 
+/// Typed at a terminal, the value would echo, so `--stdin` there is refused
+/// before anything is read or the vault is touched.
+#[test]
+fn set_stdin_refuses_a_terminal() {
+    let home = Home::new("set-stdin-tty");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    let vault = home.0.join(".config/hush/vault.age");
+    let before = std::fs::read(&vault).unwrap();
+    let (mut leader, mut follower) = (0, 0);
+    // SAFETY: both out-pointers are valid; the name, termios and winsize may
+    // be null (null_mut, since macOS takes the last two as `*mut`).
+    let rc = unsafe {
+        libc::openpty(
+            &mut leader,
+            &mut follower,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty");
+    // SAFETY: openpty returned these descriptors, and nothing else owns them.
+    let (leader, follower) = unsafe {
+        use std::os::fd::FromRawFd;
+        (
+            std::fs::File::from_raw_fd(leader),
+            std::fs::File::from_raw_fd(follower),
+        )
+    };
+    // A line and then end-of-file, so that if the check were gone the read
+    // would finish and set the value instead of waiting forever.
+    (&leader).write_all(b"typed-value\n\x04").unwrap();
+    let out = home
+        .command(&["secret", "set", "KEY", "--stdin"])
+        .stdin(follower)
+        .output()
+        .unwrap();
+    drop(leader);
+    assert!(!out.status.success(), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("stdin is a terminal"), "{err}");
+    assert_eq!(std::fs::read(&vault).unwrap(), before);
+}
+
 #[test]
 fn set_stdin_does_not_echo_the_value() {
     let home = Home::new("set-stdin");
