@@ -59,6 +59,16 @@ hush secret ls --profile acme      # what a run with acme gets
 
 A run with a profile takes that profile's entry for each name, and the unprofiled entry for names the profile doesn't have, so a key every project shares is stored once. A profile's entry replaces the unprofiled one whole: its bindings, `--env` ones included, are the only ones used. `secret bind` and `secret rm` take `--profile` too, and a profile goes away with its last entry.
 
+A key two projects share can be copied or moved between profiles and the unprofiled entries, value and bindings together:
+
+```bash
+hush secret cp OPENAI_API_KEY --to acme                 # unprofiled → acme
+hush secret mv OPENAI_API_KEY --from acme --to beta     # acme → beta; acme goes if that was its last entry
+hush secret mv OPENAI_API_KEY --from beta               # back to the unprofiled entries
+```
+
+Leaving out `--from` or `--to` means the unprofiled entries. Both refuse to overwrite an entry that already exists there unless `--force`. A copy is a separate entry: `secret set` changes one of them, and names the others that still hold the old value so you can set those too. If every project uses the same key, a single unprofiled entry is simpler than copies.
+
 A run gets its profile in one of two ways:
 
 - **`hush profile use acme`**, once, in the project. It maps the project's directory (the git root, or the current directory outside a repo; `--dir DIR` for another) to `acme`, and every `hush run` in that directory or below it uses acme and says so, unless a directory nearer to where it starts is mapped to another profile. `hush profile use --none` removes the mapping, and `hush profile ls` lists profiles with the directories mapped to them. The map is kept in the vault, so changing it takes the passphrase, and nothing is written to the project.
@@ -115,6 +125,7 @@ hush passwd                                 # change the vault passphrase
 
 # A different key under the same name for one project (see Profiles)
 hush secret add BILLING_API_KEY --host api.acme.example --profile acme
+hush secret cp BILLING_API_KEY --to acme         # or copy the unprofiled entry into acme
 cd ~/src/acme && hush profile use acme      # runs in this project now use acme's entries
 hush profile ls
 
@@ -136,7 +147,7 @@ hush secret set BILLING_API_KEY --stdin         # one value from stdin; the trai
 hush secret set BILLING_API_KEY --profile acme  # that profile's entry only
 ```
 
-It fails if the name isn't in the vault yet, and says to add it. An empty value, such as an empty pipe from a command that failed, is refused and the old one kept. The placeholder a child sees is random per run, so nothing on the agent side has to change.
+It fails if the name isn't in the vault yet, and says to add it. An empty value, such as an empty pipe from a command that failed, is refused and the old one kept. The placeholder a child sees is random per run, so nothing on the agent side has to change. When another entry, in a profile or under another name, held the same value, `secret set` names it, never the value, since it still holds the old one.
 
 ```bash
 hush secret set BILLING_API_KEY --keep-old 7d

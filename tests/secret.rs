@@ -671,3 +671,107 @@ fn unbind_removes_one_binding_and_keeps_the_secret() {
     ]);
     assert!(err.contains("no such secret: KEY in profile acme"), "{err}");
 }
+
+#[test]
+fn cp_copies_the_whole_entry_and_mv_drops_an_emptied_profile() {
+    let home = Home::new("cp-mv");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    home.ok(&[
+        "secret",
+        "bind",
+        "KEY",
+        "--host",
+        "staging.example.com",
+        "--env",
+        "staging",
+    ]);
+
+    let out = home.hush(&["secret", "cp", "KEY", "--to", "acme"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("set it in both places"), "{stderr}");
+    assert!(stderr.contains("instead of the unprofiled one"), "{stderr}");
+    assert!(!stderr.contains("REAL"), "{stderr}");
+    let acme = home.ok(&["secret", "ls", "--profile", "acme"]);
+    assert!(
+        acme.contains("KEY (profile acme)")
+            && acme.contains("host=api.example.com")
+            && acme.contains("[staging] host=staging.example.com"),
+        "{acme}"
+    );
+
+    let err = home.fails(&["secret", "cp", "KEY", "--to", "acme"]);
+    assert!(
+        err.contains("already exists in profile acme") && err.contains("--force"),
+        "{err}"
+    );
+    home.ok(&["secret", "cp", "KEY", "--to", "acme", "--force"]);
+    let err = home.fails(&["secret", "cp", "KEY", "--from", "acme", "--to", "acme"]);
+    assert!(err.contains("onto itself"), "{err}");
+    let err = home.fails(&["secret", "cp", "MISSING", "--to", "acme"]);
+    assert!(
+        err.contains("no such secret: MISSING in the unprofiled entries"),
+        "{err}"
+    );
+
+    // Moving acme's only entry to another profile removes acme.
+    home.ok(&["secret", "mv", "KEY", "--from", "acme", "--to", "beta"]);
+    assert!(
+        home.fails(&["secret", "ls", "--profile", "acme"])
+            .contains("no such profile: acme")
+    );
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(
+        ls.contains("KEY (profile beta)") && ls.contains("KEY\n"),
+        "{ls}"
+    );
+    assert!(!ls.contains("REAL"), "{ls}");
+
+    // Moving to the unprofiled entries needs --force, since KEY is there.
+    let err = home.fails(&["secret", "mv", "KEY", "--from", "beta"]);
+    assert!(
+        err.contains("already exists in the unprofiled entries"),
+        "{err}"
+    );
+    home.ok(&["secret", "mv", "KEY", "--from", "beta", "--force"]);
+    let ls = home.ok(&["secret", "ls"]);
+    assert!(!ls.contains("profile beta") && ls.contains("KEY\n"), "{ls}");
+}
+
+#[test]
+fn set_names_the_other_entries_that_still_hold_the_old_value() {
+    let home = Home::new("set-others");
+    home.ok(&["secret", "add", "KEY", "--host", "api.example.com"]);
+    home.ok(&["secret", "cp", "KEY", "--to", "acme"]);
+    home.ok(&["secret", "add", "ALIAS_KEY", "--host", "api.example.com"]);
+    let out = home
+        .command(&["secret", "add", "OTHER", "--host", "api.example.com"])
+        .env("HUSH_SECRET_VALUE", "DIFFERENT")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+
+    // The same value again changes nothing, so nothing is named.
+    let out = home.hush(&["secret", "set", "KEY"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("set it there too"), "{stderr}");
+
+    let out = home
+        .command(&["secret", "set", "KEY"])
+        .env("HUSH_SECRET_VALUE", "NEW")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("KEY in profile acme held the same value")
+            && stderr.contains("ALIAS_KEY in the unprofiled entries held the same value"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("OTHER"), "{stderr}");
+    assert!(
+        !stderr.contains("REAL") && !stderr.contains("NEW"),
+        "{stderr}"
+    );
+}
