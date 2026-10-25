@@ -50,6 +50,9 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      # The lint job runs on Linux, where macOS-only code isn't compiled.
+      - if: runner.os == 'macOS'
+        run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
 
   # Known advisories against Cargo.lock (RustSec), ignores in deny.toml.

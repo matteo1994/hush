@@ -45,6 +45,12 @@ pub fn process() {
 /// runtime`), which refuses libraries from `DYLD_INSERT_LIBRARIES` and task
 /// port reads. An unsigned or plainly signed hush loads such a library into
 /// itself, where it can read the passphrase as it's typed.
+///
+/// The answer comes from inside the process it describes, so it only
+/// catches a hush that was left unsigned by mistake: a library that is
+/// already loaded ran before `main` and can make this return true. Never use
+/// it as a gate; enforcement has to come from outside the process, such as
+/// the OS refusing the library, or a Keychain item's code requirement.
 #[cfg(target_os = "macos")]
 pub fn hardened_runtime() -> bool {
     unsafe extern "C" {

@@ -838,6 +838,35 @@ fn a_prompt_warns_when_hush_lacks_the_hardened_runtime() {
         "{unsigned}"
     );
     assert!(unsigned.contains("no terminal"), "{unsigned}");
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_hush")).unwrap();
+    assert!(
+        unsigned.contains(&format!("\"{}\"", exe.display())),
+        "{unsigned}"
+    );
+
+    // A library actually loaded, which leaves the variable set: the alarm.
+    let src = home.0.join("inject.c");
+    std::fs::write(&src, "void hush_test_injected(void) {}\n").unwrap();
+    let lib = home.0.join("inject.dylib");
+    let status = Command::new("/usr/bin/clang")
+        .args(["-dynamiclib", "-o"])
+        .arg(&lib)
+        .arg(&src)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = home
+        .command(&["secret", "ls"])
+        .env_remove("HUSH_PASSPHRASE")
+        .env("DYLD_INSERT_LIBRARIES", &lib)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("DYLD_INSERT_LIBRARIES is set")
+            && stderr.contains("don't enter the passphrase"),
+        "{stderr}"
+    );
 
     let signed = home.0.join("hush-hardened");
     std::fs::copy(env!("CARGO_BIN_EXE_hush"), &signed).unwrap();
