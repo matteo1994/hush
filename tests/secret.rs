@@ -705,7 +705,33 @@ fn cp_copies_the_whole_entry_and_mv_drops_an_emptied_profile() {
         err.contains("already exists in profile acme") && err.contains("--force"),
         "{err}"
     );
-    home.ok(&["secret", "cp", "KEY", "--to", "acme", "--force"]);
+    // --force lists what it replaces, and says when that drops a live value.
+    let out = home.hush(&["secret", "cp", "KEY", "--to", "acme", "--force"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("which holds the same value") && !stderr.contains("stops redacting"),
+        "{stderr}"
+    );
+    let out = home
+        .command(&["secret", "set", "KEY", "--profile", "acme"])
+        .env("HUSH_SECRET_VALUE", "ACME")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let out = home.hush(&["secret", "cp", "KEY", "--to", "acme", "--force"]);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("which holds a different value")
+            && stderr.contains("[staging] host=staging.example.com")
+            && stderr.contains("stops redacting"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("REAL") && !stderr.contains("ACME"),
+        "{stderr}"
+    );
     let err = home.fails(&["secret", "cp", "KEY", "--from", "acme", "--to", "acme"]);
     assert!(err.contains("onto itself"), "{err}");
     let err = home.fails(&["secret", "cp", "MISSING", "--to", "acme"]);

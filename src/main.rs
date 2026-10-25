@@ -486,23 +486,19 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
-            {
+            // Copies made with `secret cp` keep the old value; say where.
+            let others: Vec<String> = {
                 let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name)) else {
                     return Err(no_such_secret(&name, profile));
                 };
                 for b in &existing.bindings {
                     eprintln!("  {}", describe(b));
                 }
-            }
-            // Copies made with `secret cp` keep the old value; say where.
-            let others: Vec<String> = v
-                .secrets_in(profile)
-                .and_then(|s| s.get(&name))
-                .map(|e| v.others_with_value(&name, profile, &e.value))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(p, n)| format!("{n}{}", vault::place(p)))
-                .collect();
+                v.others_with_value(&name, profile, &existing.value)
+                    .into_iter()
+                    .map(|(p, n)| format!("{n}{}", vault::place(p)))
+                    .collect()
+            };
             let value = if stdin {
                 read_stdin_value()?
             } else {
@@ -527,8 +523,10 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 entry.max_age_secs = max_age_secs;
             }
             vault::save_vault(&v, &pass)?;
-            for other in others.iter().filter(|_| changed) {
-                eprintln!("{other} held the same value and still does; set it there too");
+            if changed {
+                for other in &others {
+                    eprintln!("{other} held the same value and still does; set it there too");
+                }
             }
         }
         SecretAction::Cp {
@@ -833,6 +831,27 @@ fn copy_or_move(
     if let Some(entry) = v.secrets_in(from).and_then(|s| s.get(name)) {
         for b in &entry.bindings {
             eprintln!("  {}", describe(b));
+        }
+    }
+    if force && let Some(existing) = v.secrets_in(to).and_then(|s| s.get(name)) {
+        let differs = v
+            .secrets_in(from)
+            .and_then(|s| s.get(name))
+            .is_some_and(|e| e.value != existing.value);
+        let what = if differs {
+            "a different value"
+        } else {
+            "the same value"
+        };
+        eprintln!(
+            "replacing {name}{}, which holds {what}, and its bindings:",
+            vault::place(to)
+        );
+        for b in &existing.bindings {
+            eprintln!("  {}", describe(b));
+        }
+        if differs {
+            eprintln!("that value is dropped, not retired, so hush stops redacting it");
         }
     }
     if remove_source {

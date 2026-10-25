@@ -570,10 +570,9 @@ impl Vault {
     }
 }
 
-/// Refuses a `--profile` name that would be awkward on a command line or in
-/// `secret ls` output: it starts with a letter or digit (not `-`, `.` or
-/// `..`), then letters, digits, `-`, `_` and `.`.
-/// ` in profile P`, or ` in the unprofiled entries`, for messages.
+/// ` in profile P`, or ` in the unprofiled entries`, for messages. Unlike
+/// `in_profile` in `main.rs`, it names the unprofiled entries too, for
+/// messages about two places where leaving one unnamed would be ambiguous.
 pub fn place(profile: Option<&str>) -> String {
     match profile {
         Some(p) => format!(" in profile {p}"),
@@ -581,6 +580,9 @@ pub fn place(profile: Option<&str>) -> String {
     }
 }
 
+/// Refuses a `--profile` name that would be awkward on a command line or in
+/// `secret ls` output: it starts with a letter or digit (not `-`, `.` or
+/// `..`), then letters, digits, `-`, `_` and `.`.
 pub fn check_profile(name: &str) -> Result<()> {
     if !name.starts_with(|c: char| c.is_ascii_alphanumeric())
         || !name
