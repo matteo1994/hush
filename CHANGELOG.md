@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.26 (2026-10-25)
+
+- Warn on macOS when hush isn't signed with the hardened runtime (#48)
+
 ## 0.1.25 (2026-10-25)
 
 - Add `secret cp`/`secret mv` and name stale copies on `secret set` (#47)
