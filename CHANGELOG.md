@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.25 (2026-10-25)
+
+- Add `secret cp`/`secret mv` and name stale copies on `secret set` (#47)
+
 ## 0.1.24 (2026-10-24)
 
 - Scrub a retired secret for a grace period after rotation. (#45)
