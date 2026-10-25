@@ -41,6 +41,41 @@ pub fn process() {
     }
 }
 
+/// Whether this process runs with the hardened runtime (`codesign -o
+/// runtime`), which refuses libraries from `DYLD_INSERT_LIBRARIES` and task
+/// port reads. An unsigned or plainly signed hush loads such a library into
+/// itself, where it can read the passphrase as it's typed.
+///
+/// The answer comes from inside the process it describes, so it only
+/// catches a hush that was left unsigned by mistake: a library that is
+/// already loaded ran before `main` and can make this return true. Never use
+/// it as a gate; enforcement has to come from outside the process, such as
+/// the OS refusing the library, or a Keychain item's code requirement.
+#[cfg(target_os = "macos")]
+pub fn hardened_runtime() -> bool {
+    unsafe extern "C" {
+        fn csops(
+            pid: libc::pid_t,
+            ops: u32,
+            useraddr: *mut libc::c_void,
+            usersize: libc::size_t,
+        ) -> libc::c_int;
+    }
+    const CS_OPS_STATUS: u32 = 0;
+    const CS_RUNTIME: u32 = 0x0001_0000;
+    let mut flags: u32 = 0;
+    // SAFETY: CS_OPS_STATUS writes one u32 of code-signing flags.
+    let ok = unsafe {
+        csops(
+            libc::getpid(),
+            CS_OPS_STATUS,
+            (&raw mut flags).cast(),
+            std::mem::size_of::<u32>(),
+        )
+    } == 0;
+    ok && flags & CS_RUNTIME != 0
+}
+
 /// Printed before any child exists, so it can't land on a child's screen.
 fn warn(what: &str) {
     eprintln!(

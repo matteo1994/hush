@@ -15,6 +15,8 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
         return Ok(v);
     }
     warn_if_inside_run();
+    #[cfg(target_os = "macos")]
+    warn_if_not_hardened();
     rpassword::prompt_password(prompt).map_err(|e| match e.raw_os_error() {
         Some(libc::ENXIO) => anyhow::anyhow!(
             "no terminal to prompt on for {}",
@@ -38,6 +40,36 @@ fn warn_if_inside_run() {
             eprintln!("hush: only enter the passphrase if you typed this command yourself.");
         });
     }
+}
+
+/// Before the first prompt of a hush without the hardened runtime: a library
+/// in `DYLD_INSERT_LIBRARIES`, set by anything that can edit your shell's
+/// startup files, would run inside it and see what's typed. A library that is
+/// already loaded can hide this (see `harden::hardened_runtime`), so it only
+/// catches a hush left unsigned by mistake, or a careless injection that
+/// leaves the variable set.
+#[cfg(target_os = "macos")]
+fn warn_if_not_hardened() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if harden::hardened_runtime() {
+        return;
+    }
+    WARNED.call_once(|| {
+        if std::env::var_os("DYLD_INSERT_LIBRARIES").is_some() {
+            eprintln!(
+                "hush: WARNING: DYLD_INSERT_LIBRARIES is set, so another program's code is probably running inside this hush right now."
+            );
+            eprintln!("hush: don't enter the passphrase; find what set the variable first.");
+        } else {
+            eprintln!(
+                "hush: warning: this hush isn't signed with the hardened runtime, so a library another program injects could read the passphrase."
+            );
+        }
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "$(command -v hush)".into());
+        eprintln!("hush: sign it once per install: sudo codesign -f -s - -o runtime \"{exe}\"");
+    });
 }
 
 /// Asks a yes/no question on the terminal, defaulting to no. Like the
