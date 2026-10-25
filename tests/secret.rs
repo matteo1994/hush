@@ -26,7 +26,11 @@ impl Home {
     }
 
     fn command_in(&self, dir: &Path, args: &[&str]) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_hush"));
+        self.command_of(Path::new(env!("CARGO_BIN_EXE_hush")), dir, args)
+    }
+
+    fn command_of(&self, program: &Path, dir: &Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new(program);
         // SAFETY: setsid is async-signal-safe.
         unsafe {
             cmd.pre_exec(|| {
@@ -800,4 +804,50 @@ fn set_names_the_other_entries_that_still_hold_the_old_value() {
         !stderr.contains("REAL") && !stderr.contains("NEW"),
         "{stderr}"
     );
+}
+
+/// An unsigned hush warns at its first prompt that an injected library could
+/// read the passphrase; the same binary signed with the hardened runtime
+/// doesn't. A value from `HUSH_PASSPHRASE` is no prompt, so no warning.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prompt_warns_when_hush_lacks_the_hardened_runtime() {
+    let home = Home::new("hardened");
+    let warning = "isn't signed with the hardened runtime";
+
+    let out = home.hush(&["secret", "ls"]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains(warning),
+        "{out:?}"
+    );
+
+    let prompt = |program: &Path| {
+        let out = home
+            .command_of(program, &home.0, &["secret", "ls"])
+            .env_remove("HUSH_PASSPHRASE")
+            .output()
+            .unwrap();
+        // Detached from the terminal, the prompt itself fails.
+        assert!(!out.status.success(), "{out:?}");
+        String::from_utf8(out.stderr).unwrap()
+    };
+    let unsigned = prompt(Path::new(env!("CARGO_BIN_EXE_hush")));
+    assert!(
+        unsigned.contains(warning) && unsigned.contains("codesign"),
+        "{unsigned}"
+    );
+    assert!(unsigned.contains("no terminal"), "{unsigned}");
+
+    let signed = home.0.join("hush-hardened");
+    std::fs::copy(env!("CARGO_BIN_EXE_hush"), &signed).unwrap();
+    let status = Command::new("codesign")
+        .args(["-f", "-s", "-", "-o", "runtime"])
+        .arg(&signed)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let hardened = prompt(&signed);
+    assert!(!hardened.contains(warning), "{hardened}");
+    assert!(hardened.contains("no terminal"), "{hardened}");
 }

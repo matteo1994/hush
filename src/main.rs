@@ -15,6 +15,8 @@ fn read_secret(prompt: &str, env_override: &str) -> Result<String> {
         return Ok(v);
     }
     warn_if_inside_run();
+    #[cfg(target_os = "macos")]
+    warn_if_not_hardened();
     rpassword::prompt_password(prompt).map_err(|e| match e.raw_os_error() {
         Some(libc::ENXIO) => anyhow::anyhow!(
             "no terminal to prompt on for {}",
@@ -36,6 +38,24 @@ fn warn_if_inside_run() {
                 "hush: WARNING: this is running inside `hush run`, possibly started by an agent rather than you."
             );
             eprintln!("hush: only enter the passphrase if you typed this command yourself.");
+        });
+    }
+}
+
+/// Before the first prompt of a hush without the hardened runtime: a library
+/// in `DYLD_INSERT_LIBRARIES`, set by anything that can edit your shell's
+/// startup files, would run inside it and see what's typed.
+#[cfg(target_os = "macos")]
+fn warn_if_not_hardened() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if !harden::hardened_runtime() {
+        WARNED.call_once(|| {
+            eprintln!(
+                "hush: warning: this hush isn't signed with the hardened runtime, so a library another program injects could read the passphrase."
+            );
+            eprintln!(
+                "hush: sign it once per install: sudo codesign -f -s - -o runtime \"$(command -v hush)\""
+            );
         });
     }
 }
