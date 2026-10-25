@@ -481,6 +481,72 @@ impl Vault {
         }
     }
 
+    /// Copies the whole entry for `name` from `from` to `to` (`None` is the
+    /// unprofiled entries): value, bindings, age and retired values, as a
+    /// profile's entry replaces the unprofiled one whole. An entry already
+    /// at `to` is replaced only with `replace`.
+    pub fn copy_entry(
+        &mut self,
+        name: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        replace: bool,
+    ) -> Result<()> {
+        if from == to {
+            bail!("{name} would be copied onto itself; --from and --to name the same place");
+        }
+        let Some(entry) = self.secrets_in(from).and_then(|s| s.get(name)).cloned() else {
+            bail!("no such secret: {name}{}", place(from));
+        };
+        if !replace && self.secrets_in(to).is_some_and(|s| s.contains_key(name)) {
+            bail!(
+                "{name} already exists{}; pass --force to replace it",
+                place(to)
+            );
+        }
+        self.secrets_in_or_new(to).insert(name.to_string(), entry);
+        Ok(())
+    }
+
+    /// `copy_entry`, then the entry at `from` goes, and its profile with it
+    /// once it holds nothing, as `remove` does.
+    pub fn move_entry(
+        &mut self,
+        name: &str,
+        from: Option<&str>,
+        to: Option<&str>,
+        replace: bool,
+    ) -> Result<()> {
+        self.copy_entry(name, from, to, replace)?;
+        self.remove(name, from);
+        Ok(())
+    }
+
+    /// Every other entry, under any name and in any profile, whose value is
+    /// `value`: copies a rotation of `name` in `profile` leaves behind.
+    pub fn others_with_value<'a>(
+        &'a self,
+        name: &str,
+        profile: Option<&str>,
+        value: &str,
+    ) -> Vec<(Option<&'a str>, &'a str)> {
+        let places = std::iter::once((None, &self.secrets)).chain(
+            self.profiles
+                .iter()
+                .map(|(p, entries)| (Some(p.as_str()), &entries.secrets)),
+        );
+        let mut found: Vec<(Option<&str>, &str)> = places
+            .flat_map(|(p, entries)| {
+                entries
+                    .iter()
+                    .filter(move |(n, e)| e.value == value && !(p == profile && *n == name))
+                    .map(move |(n, _)| (p, n.as_str()))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
     /// Removes `name` from `profile` (or the unprofiled entries), and the
     /// profile with it once it holds nothing, so `ls` doesn't list it.
     pub fn remove(&mut self, name: &str, profile: Option<&str>) -> Option<SecretEntry> {
@@ -501,6 +567,16 @@ impl Vault {
                 .get_key_value(d.to_str()?)
                 .map(|(d, p)| (d.as_str(), p.as_str()))
         })
+    }
+}
+
+/// ` in profile P`, or ` in the unprofiled entries`, for messages. Unlike
+/// `in_profile` in `main.rs`, it names the unprofiled entries too, for
+/// messages about two places where leaving one unnamed would be ambiguous.
+pub fn place(profile: Option<&str>) -> String {
+    match profile {
+        Some(p) => format!(" in profile {p}"),
+        None => " in the unprofiled entries".to_string(),
     }
 }
 
@@ -1047,6 +1123,104 @@ mod tests {
         for bad in ["", "90", "0d", "0", "d", "-1d", "1x", "999999999999999999d"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn copy_takes_the_whole_entry_and_refuses_to_overwrite() {
+        let mut v = Vault::new();
+        let mut key = entry(
+            "V1",
+            &[("api.example.com", None), ("st.example.com", Some("st"))],
+        );
+        key.rotated_at = Some(1000);
+        key.max_age_secs = Some(86400);
+        v.secrets.insert("K".into(), key);
+
+        v.copy_entry("K", None, Some("acme"), false).unwrap();
+        let copied = &v.profiles["acme"].secrets["K"];
+        assert_eq!(copied.value, "V1");
+        assert_eq!(copied.bindings.len(), 2);
+        assert_eq!(
+            (copied.rotated_at, copied.max_age_secs),
+            (Some(1000), Some(86400))
+        );
+        assert!(v.secrets.contains_key("K"), "a copy keeps the source");
+
+        // The copy is separate from the source.
+        v.profiles
+            .get_mut("acme")
+            .unwrap()
+            .secrets
+            .get_mut("K")
+            .unwrap()
+            .value = "V2".into();
+        assert_eq!(v.secrets["K"].value, "V1");
+
+        let err = v.copy_entry("K", None, Some("acme"), false).unwrap_err();
+        assert!(
+            err.to_string().contains("already exists in profile acme"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("V1"), "{err}");
+        assert_eq!(v.profiles["acme"].secrets["K"].value, "V2");
+        v.copy_entry("K", None, Some("acme"), true).unwrap();
+        assert_eq!(v.profiles["acme"].secrets["K"].value, "V1");
+
+        let err = v
+            .copy_entry("K", Some("acme"), Some("acme"), true)
+            .unwrap_err();
+        assert!(err.to_string().contains("onto itself"), "{err}");
+        let err = v.copy_entry("NOPE", None, Some("acme"), false).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no such secret: NOPE in the unprofiled entries"),
+            "{err}"
+        );
+        // A failed copy to a new profile doesn't leave it behind empty.
+        assert!(v.copy_entry("NOPE", None, Some("new"), false).is_err());
+        assert!(!v.profiles.contains_key("new"));
+    }
+
+    #[test]
+    fn move_drops_the_source_and_a_profile_it_empties() {
+        let mut v = Vault::new();
+        v.profiles
+            .entry("acme".into())
+            .or_default()
+            .secrets
+            .insert("K".into(), entry("V", &[("api.example.com", None)]));
+        v.move_entry("K", Some("acme"), None, false).unwrap();
+        assert_eq!(v.secrets["K"].value, "V");
+        assert!(!v.profiles.contains_key("acme"), "{:?}", v.profiles.keys());
+
+        v.move_entry("K", None, Some("globex"), false).unwrap();
+        assert!(v.secrets.is_empty());
+        assert_eq!(v.profiles["globex"].secrets["K"].bindings.len(), 1);
+
+        // Refused, so nothing moves.
+        v.secrets.insert("K".into(), entry("OTHER", &[]));
+        assert!(v.move_entry("K", Some("globex"), None, false).is_err());
+        assert_eq!(v.secrets["K"].value, "OTHER");
+        assert!(v.profiles["globex"].secrets.contains_key("K"));
+    }
+
+    #[test]
+    fn others_with_value_finds_copies_under_any_name_and_profile() {
+        let mut v = Vault::new();
+        v.secrets.insert("K".into(), entry("SAME", &[]));
+        v.secrets.insert("ALIAS".into(), entry("SAME", &[]));
+        v.secrets.insert("DIFFERENT".into(), entry("OTHER", &[]));
+        v.copy_entry("K", None, Some("acme"), false).unwrap();
+        v.copy_entry("K", None, Some("globex"), false).unwrap();
+        assert_eq!(
+            v.others_with_value("K", None, "SAME"),
+            [(None, "ALIAS"), (Some("acme"), "K"), (Some("globex"), "K")]
+        );
+        assert_eq!(
+            v.others_with_value("K", Some("acme"), "SAME"),
+            [(None, "ALIAS"), (None, "K"), (Some("globex"), "K")]
+        );
+        assert!(v.others_with_value("DIFFERENT", None, "OTHER").is_empty());
     }
 
     #[test]

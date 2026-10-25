@@ -149,6 +149,34 @@ enum SecretAction {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
+    /// Copy a secret, with its bindings, to another profile or to the
+    /// unprofiled entries. The copy is separate: rotate each one.
+    Cp {
+        name: String,
+        /// The profile to copy from. Leave out for the unprofiled entries.
+        #[arg(long, value_name = "PROFILE")]
+        from: Option<String>,
+        /// The profile to copy to. Leave out for the unprofiled entries.
+        #[arg(long, value_name = "PROFILE")]
+        to: Option<String>,
+        /// Replace NAME at the destination if it is already there.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Move a secret, with its bindings, to another profile or to the
+    /// unprofiled entries.
+    Mv {
+        name: String,
+        /// The profile to move from. Leave out for the unprofiled entries.
+        #[arg(long, value_name = "PROFILE")]
+        from: Option<String>,
+        /// The profile to move to. Leave out for the unprofiled entries.
+        #[arg(long, value_name = "PROFILE")]
+        to: Option<String>,
+        /// Replace NAME at the destination if it is already there.
+        #[arg(long)]
+        force: bool,
+    },
     /// Remove one host binding from a secret.
     Unbind {
         name: String,
@@ -458,14 +486,19 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             let pass = passphrase()?;
             let _lock = vault::lock_vault()?;
             let mut v = vault::load_vault(&pass)?;
-            {
+            // Copies made with `secret cp` keep the old value; say where.
+            let others: Vec<String> = {
                 let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name)) else {
                     return Err(no_such_secret(&name, profile));
                 };
                 for b in &existing.bindings {
                     eprintln!("  {}", describe(b));
                 }
-            }
+                v.others_with_value(&name, profile, &existing.value)
+                    .into_iter()
+                    .map(|(p, n)| format!("{n}{}", vault::place(p)))
+                    .collect()
+            };
             let value = if stdin {
                 read_stdin_value()?
             } else {
@@ -479,6 +512,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
                 return Err(no_such_secret(&name, profile));
             };
+            let changed = entry.value != value;
             let now = vault::now_unix();
             if let Some(secs) = keep_for {
                 entry.retire_current(&value, vault::until_unix(now, secs), now);
@@ -489,7 +523,24 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
                 entry.max_age_secs = max_age_secs;
             }
             vault::save_vault(&v, &pass)?;
+            if changed {
+                for other in &others {
+                    eprintln!("{other} held the same value and still does; set it there too");
+                }
+            }
         }
+        SecretAction::Cp {
+            name,
+            from,
+            to,
+            force,
+        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, false)?,
+        SecretAction::Mv {
+            name,
+            from,
+            to,
+            force,
+        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, true)?,
         SecretAction::Unbind {
             name,
             host,
@@ -556,16 +607,7 @@ fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
             if v.remove(&name, profile).is_none() {
                 bail!("no such secret: {name}{}", in_profile(profile));
             }
-            // Kept, so adding a secret to the profile again brings them back.
-            if let Some(p) = profile
-                && !v.profiles.contains_key(p)
-            {
-                for (d, _) in v.directories.iter().filter(|(_, q)| *q == p) {
-                    eprintln!(
-                        "profile {p} is empty now and removed, but {d} is still mapped to it; runs there use the unprofiled entries"
-                    );
-                }
-            }
+            warn_if_emptied(&v, profile);
             vault::save_vault(&v, &pass)?;
         }
         SecretAction::Ls { profile } => {
@@ -756,6 +798,88 @@ fn canonical_gone(path: &Path) -> PathBuf {
                 base = parent;
             }
             _ => return lexical,
+        }
+    }
+}
+
+/// `secret cp`, or with `remove_source`, `secret mv`. The whole entry goes,
+/// bindings included, since a profile's entry replaces the unprofiled one
+/// whole.
+fn copy_or_move(
+    name: &str,
+    from: Option<&str>,
+    to: Option<&str>,
+    force: bool,
+    remove_source: bool,
+) -> Result<()> {
+    let from = profile_arg(from)?;
+    let to = profile_arg(to)?;
+    let verb = if remove_source { "moving" } else { "copying" };
+    let replacing = if force {
+        ", replacing it there if it exists"
+    } else {
+        ""
+    };
+    eprintln!(
+        "{verb} {name} with its bindings from{} to{}{replacing}",
+        vault::place(from),
+        vault::place(to)
+    );
+    let pass = passphrase()?;
+    let _lock = vault::lock_vault()?;
+    let mut v = vault::load_vault(&pass)?;
+    if let Some(entry) = v.secrets_in(from).and_then(|s| s.get(name)) {
+        for b in &entry.bindings {
+            eprintln!("  {}", describe(b));
+        }
+    }
+    if force && let Some(existing) = v.secrets_in(to).and_then(|s| s.get(name)) {
+        let differs = v
+            .secrets_in(from)
+            .and_then(|s| s.get(name))
+            .is_some_and(|e| e.value != existing.value);
+        let what = if differs {
+            "a different value"
+        } else {
+            "the same value"
+        };
+        eprintln!(
+            "replacing {name}{}, which holds {what}, and its bindings:",
+            vault::place(to)
+        );
+        for b in &existing.bindings {
+            eprintln!("  {}", describe(b));
+        }
+        if differs {
+            eprintln!("that value is dropped, not retired, so hush stops redacting it");
+        }
+    }
+    if remove_source {
+        v.move_entry(name, from, to, force)?;
+        warn_if_emptied(&v, from);
+    } else {
+        v.copy_entry(name, from, to, force)?;
+        eprintln!("the copy is separate: after `hush secret set`, set it in both places");
+    }
+    if let Some(p) = to
+        && v.secrets.contains_key(name)
+    {
+        eprintln!("runs with profile {p} will use this {name} instead of the unprofiled one");
+    }
+    vault::save_vault(&v, &pass)?;
+    Ok(())
+}
+
+/// After an entry left `profile`. Its directory mappings are kept, so adding
+/// a secret to the profile again brings them back.
+fn warn_if_emptied(v: &vault::Vault, profile: Option<&str>) {
+    if let Some(p) = profile
+        && !v.profiles.contains_key(p)
+    {
+        for (d, _) in v.directories.iter().filter(|(_, q)| *q == p) {
+            eprintln!(
+                "profile {p} is empty now and removed, but {d} is still mapped to it; runs there use the unprofiled entries"
+            );
         }
     }
 }
