@@ -136,7 +136,7 @@ pub fn run(
     cwd: &Path,
     env: Option<String>,
     cmd: Vec<String>,
-    passphrase: impl FnOnce() -> Result<String>,
+    open_vault: impl FnOnce() -> Result<vault::Vault>,
 ) -> Result<ExitCode> {
     if std::env::var_os(ACTIVE_VAR).is_some() {
         bail!(
@@ -149,7 +149,7 @@ pub fn run(
     }
 
     let minted = {
-        let vault = vault::load_vault(&passphrase()?)?;
+        let vault = open_vault()?;
         let profile = profile.or_else(|| mapped_profile(&vault, cwd));
         // A mistyped --profile, or a mapped profile whose last entry was
         // removed, would otherwise quietly run with the unprofiled entries.

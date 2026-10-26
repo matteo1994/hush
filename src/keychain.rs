@@ -29,6 +29,8 @@ use crate::{harden, vault};
 const SERVICE: &str = "hush";
 /// errSecItemNotFound.
 const NOT_FOUND: i32 = -25300;
+/// How long `unlock` waits for Touch ID before falling back.
+const ANSWER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// One item per vault, named by the vault's path, so a vault under another
 /// `HOME`, such as a test's, never reads this one's passphrase.
@@ -160,7 +162,8 @@ fn confirm_owner(reason: &str) -> Result<(), Option<String>> {
     unsafe {
         ctx.evaluatePolicy_localizedReason_reply(policy, &NSString::from_str(reason), &reply)
     };
-    match rx.recv() {
+    // Nobody may be at the Mac: over SSH, or with the screen locked.
+    match rx.recv_timeout(ANSWER_TIMEOUT) {
         Ok((true, _)) => Ok(()),
         Ok((false, Some(code)))
             if [
@@ -177,6 +180,17 @@ fn confirm_owner(reason: &str) -> Result<(), Option<String>> {
             "authentication failed (LAError {})",
             code.unwrap_or_default()
         ))),
-        Err(_) => Err(Some("no answer from LocalAuthentication".into())),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // SAFETY: a plain method call on a live context; it dismisses
+            // the dialog, so a late answer unlocks nothing.
+            unsafe { ctx.invalidate() };
+            Err(Some(format!(
+                "no answer to the Touch ID prompt in {}s",
+                ANSWER_TIMEOUT.as_secs()
+            )))
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(Some("no answer from LocalAuthentication".into()))
+        }
     }
 }
