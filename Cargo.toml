@@ -20,6 +20,15 @@ time = "0.3.55"
 pem = "4"
 libc = "0.2"
 
+# The keychain unlock for `hush run` (keychain.rs). security-framework is
+# already here through rustls-native-certs.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "LAContext", "LAError", "block2"] }
+
 [dev-dependencies]
 x509-parser = "0.18"
 

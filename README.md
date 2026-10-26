@@ -167,6 +167,34 @@ hush passwd    # current passphrase, then the new one twice
 
 `hush secret unbind NAME --host HOST` removes that one binding. The secret and its other bindings stay. When the same host is bound for more than one environment, pass `--env` to say which (`default` for the binding without one). A secret with no bindings left is kept, and `hush run` will not inject it until it is bound again. Changing a binding is unbind, then bind; `secret bind` says so when the environment is already bound.
 
+## Without a terminal: agent apps on macOS
+
+An app started from the Dock, such as the Claude desktop app, starts its MCP servers with no terminal, so `hush run` there can't ask for the passphrase. On macOS it can open the vault with Touch ID instead, or your login password where there is no sensor:
+
+```bash
+sudo codesign -f -s - -o runtime /opt/hush/bin/hush   # required, see Installing
+hush keychain enable     # asks for the passphrase once and saves it in your login keychain
+hush keychain status
+hush keychain disable    # removes it; hush run asks for the passphrase again
+```
+
+Only `hush run` uses the saved passphrase, after Touch ID. Every command that changes the vault still asks for it to be typed. The Touch ID prompt names the command it is for (`open the vault for hush run -- npx …`); one you didn't expect means something else started `hush run`, so cancel it. After you install a new hush, macOS asks once for your login password before the new binary can read the item; `hush passwd` updates it. `keychain enable` refuses a hush without the hardened runtime.
+
+An MCP server then runs under hush from the app's config, with the key in the vault instead of the file. In `~/Library/Application Support/Claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "example": {
+      "command": "/opt/hush/bin/hush",
+      "args": ["run", "--secret", "EXAMPLE_API_KEY", "--", "npx", "-y", "example-mcp-server"]
+    }
+  }
+}
+```
+
+The server gets a placeholder, and its requests to the host the secret is bound to get the real value. This works for a server that reads its key from an environment variable and makes its requests with an HTTP client that honors `HTTPS_PROXY` and hush's CA variables (listed under *HTTPS*). Name that variable with `--secret`, store the key with `hush secret add EXAMPLE_API_KEY --host api.example.com`, and match the binding's `--header` and `--format` to what the server sends, since hush swaps only that header. Tested with a Python server using `urllib`; check a new server once with a key bound to an echo service, as under *A bound host that echoes the key back*. The Claude desktop app starts each configured server twice, so expect two Touch ID prompts when it launches.
+
 ## Current scope (v0)
 
 - **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, not HTTP/2. A client that keeps its connection open gets one upstream connection for as long as it does, so repeated requests skip the TLS handshake; plain HTTP is still one request per connection. WebSocket upgrades to a bound host aren't supported.
@@ -188,6 +216,8 @@ Found a way around it? See [SECURITY.md](SECURITY.md) for how to report it priva
 - hush asks for the passphrase at the start of `hush run`, before the command starts, and for hush commands you type. A passphrase prompt that shows up while an agent is working comes from the agent. Change the vault from a terminal of your own, not from a shell inside `hush run`.
 - Install hush where only an administrator can write, as *Installing* does (`/opt/hush/bin`), and call it by that path or make sure it comes first on `PATH`.
 - Run the agent in a sandbox that can't write outside the project, so it can't touch your shell's startup files. That also covers the files in `~/.config/hush` below.
+
+**The passphrase saved in the Keychain (macOS).** `hush keychain enable` saves the passphrase as an item in your login keychain. macOS lets the hush that saved it read it without asking, and asks for your login password when any other program, or a changed hush binary, tries. That is what keeps a child out, provided hush has the hardened runtime: without it, a library from `DYLD_INSERT_LIBRARIES` would run inside hush and could read the item. The Touch ID check runs inside hush, so it only stops a `hush run` that nobody approved from opening the vault silently; a child that starts `hush run` itself still gets your Touch ID prompt, and if you approve it, that run gets placeholders like any other and changes nothing. Saving the passphrase also makes your login password a second way to open the vault: anyone who has it, or root, can read the item, and a backup of `~/Library/Keychains` holds it encrypted with that password. A Touch ID-only item, which even root can't read without you, needs an app signed with a paid Apple developer ID; hush isn't.
 
 **The files in `~/.config/hush`** belong to your user, so a `hush run` child can delete, replace or lock any of them. Without the passphrase it can't read the vault or make one hush accepts, but it can put back an older copy of `vault.age`, and that brings back every secret and binding the copy had. So `secret rm`, or taking a host off a key, only changes this vault file: if you no longer trust a host with a key, revoke the key at the vendor too. The other files carry nothing to steal. `global.env` only names which secrets a run gets placeholders for, and the run directories hold public certificates. Deleting or locking them, or the vault, makes hush commands fail or wait; it doesn't leak anything.
 
