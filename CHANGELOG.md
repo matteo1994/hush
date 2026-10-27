@@ -4,6 +4,12 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.28 (2026-10-27)
+
+- Share the mile plan: track .mile/routes and keep the rest of .mile local. (#50)
+- Add CI, version, license and platform badges to the README. (#51)
+- Publish hush on crates.io as hush-secrets; the program is still called hush. (#52)
+
 ## 0.1.27 (2026-10-27)
 
 - Unlock hush run with Touch ID on macOS so agent apps can start it (#49)
