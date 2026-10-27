@@ -1,8 +1,26 @@
 [package]
-name = "hush"
+name = "hush-secrets"
 version = "0.1.27"
 edition = "2024"
+# cargo install ignores rust-toolchain.toml; File::lock needs 1.89.
+rust-version = "1.89"
 license = "Apache-2.0"
+description = "A placeholder-swap credential proxy that keeps real API keys out of an AI coding agent's environment, context and transcript"
+repository = "https://github.com/matteo1994/hush"
+readme = "README.md"
+keywords = ["secrets", "proxy", "api-keys", "ai-agents", "credentials"]
+categories = ["command-line-utilities", "cryptography", "network-programming"]
+# The crate is published as hush-secrets (hush was taken); the program and the
+# library the fuzz targets use are still called hush.
+include = ["/src", "/tests", "/build.rs", "/Cargo.lock", "/README.md", "/LICENSE", "/SECURITY.md", "/CHANGELOG.md"]
+
+[lib]
+name = "hush"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hush"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
