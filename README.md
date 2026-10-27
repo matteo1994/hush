@@ -249,6 +249,15 @@ sudo install -d -m 755 /opt/hush/bin
 sudo install -m 755 target/release/hush /opt/hush/bin/
 ```
 
+Or build the published crate, which is called `hush-secrets` on crates.io (the program is still `hush`). `cargo install` doesn't read `rust-toolchain.toml`, so it builds with your default toolchain, which has to be Rust 1.89 or newer; install it into a temporary directory and copy it from there, not into `~/.cargo/bin` (see below):
+
+```bash
+cargo install --locked hush-secrets --root /tmp/hush-build
+sudo install -d -m 755 /opt/hush/bin
+sudo install -m 755 /tmp/hush-build/bin/hush /opt/hush/bin/
+rm -rf /tmp/hush-build
+```
+
 Then put `/opt/hush/bin` first on your `PATH`, in your shell's startup file (`export PATH="/opt/hush/bin:$PATH"`), and check:
 
 ```bash

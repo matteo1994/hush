@@ -32,7 +32,10 @@ else
     IFS=. read -r major minor patch <<<"$current"
     export NEW="$major.$minor.$((patch + 1))"
     perl -0pi -e 's/^version = "[^"]+"/version = "$ENV{NEW}"/m' Cargo.toml
-    perl -0pi -e 's/(name = "hush"\nversion = ")[^"]+/$1$ENV{NEW}/' Cargo.lock
+    # The package's own entry in Cargo.lock, found by the name in Cargo.toml.
+    NAME=$(sed -n 's/^name = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    export NAME
+    perl -0pi -e 's/(name = "\Q$ENV{NAME}\E"\nversion = ")[^"]+/$1$ENV{NEW}/' Cargo.lock
 fi
 
 # Everything since the previous release, oldest first, above the older entries.

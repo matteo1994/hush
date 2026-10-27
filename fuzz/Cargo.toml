@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-hush = { path = ".." }
+hush = { path = "..", package = "hush-secrets" }
 
 # Its own workspace, so the main crate's builds and lockfile never see it.
 [workspace]
