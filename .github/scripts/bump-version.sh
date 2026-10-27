@@ -32,10 +32,14 @@ else
     IFS=. read -r major minor patch <<<"$current"
     export NEW="$major.$minor.$((patch + 1))"
     perl -0pi -e 's/^version = "[^"]+"/version = "$ENV{NEW}"/m' Cargo.toml
-    # The package's own entry in Cargo.lock, found by the name in Cargo.toml.
-    NAME=$(sed -n 's/^name = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    # The package's own entry in Cargo.lock, found by the name in Cargo.toml's
+    # [package] table ([lib] and [[bin]] have names too). Fail if it isn't
+    # there, rather than release a Cargo.lock that --locked builds reject.
+    NAME=$(sed -n '/^\[package\]/,/^\[/ s/^name = "\(.*\)"$/\1/p' Cargo.toml)
     export NAME
     perl -0pi -e 's/(name = "\Q$ENV{NAME}\E"\nversion = ")[^"]+/$1$ENV{NEW}/' Cargo.lock
+    perl -0ne 'exit !/name = "\Q$ENV{NAME}\E"\nversion = "\Q$ENV{NEW}\E"/' Cargo.lock \
+        || { echo "bump-version: no Cargo.lock entry for $NAME" >&2; exit 1; }
 fi
 
 # Everything since the previous release, oldest first, above the older entries.
