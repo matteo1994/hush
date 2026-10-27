@@ -880,3 +880,32 @@ fn a_prompt_warns_when_hush_lacks_the_hardened_runtime() {
     assert!(!hardened.contains(warning), "{hardened}");
     assert!(hardened.contains("no terminal"), "{hardened}");
 }
+
+/// Saving the passphrase is refused before it is asked for when hush lacks
+/// the hardened runtime, and nothing is saved. The Keychain and Touch ID
+/// themselves need a person at the Mac, so they aren't tested here.
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_enable_refuses_a_hush_without_the_hardened_runtime() {
+    let home = Home::new("keychain");
+    let out = home
+        .command(&["keychain", "enable"])
+        .env_remove("HUSH_PASSPHRASE")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("hardened runtime") && stderr.contains("codesign"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("saving the vault passphrase"), "{stderr}");
+    assert!(!stderr.contains("no terminal"), "{stderr}");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn keychain_is_macos_only() {
+    let home = Home::new("keychain");
+    assert!(home.fails(&["keychain", "status"]).contains("macOS only"));
+}

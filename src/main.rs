@@ -65,10 +65,7 @@ fn warn_if_not_hardened() {
                 "hush: warning: this hush isn't signed with the hardened runtime, so a library another program injects could read the passphrase."
             );
         }
-        let exe = std::env::current_exe()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "$(command -v hush)".into());
-        eprintln!("hush: sign it once per install: sudo codesign -f -s - -o runtime \"{exe}\"");
+        eprintln!("hush: sign it once per install: {}", harden::codesign_hint());
     });
 }
 
@@ -108,6 +105,12 @@ enum Command {
     Secret {
         #[command(subcommand)]
         action: SecretAction,
+    },
+    /// Let `hush run` open the vault with Touch ID or your login password
+    /// instead of the passphrase, from the login keychain (macOS).
+    Keychain {
+        #[command(subcommand)]
+        action: KeychainAction,
     },
     /// Choose which profile `hush run` uses in a project.
     Profile {
@@ -257,6 +260,17 @@ enum SecretAction {
 }
 
 #[derive(Subcommand)]
+enum KeychainAction {
+    /// Save the passphrase in the login keychain for `hush run`. Vault
+    /// changes still ask for it.
+    Enable,
+    /// Remove the saved passphrase.
+    Disable,
+    /// Say whether a passphrase is saved for this vault.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum ProfileAction {
     /// Make `hush run` in this project (its git root, else this directory)
     /// use profile NAME.
@@ -296,6 +310,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Init => cmd_init(),
         Command::Passwd => cmd_passwd(),
         Command::Secret { action } => cmd_secret(action),
+        Command::Keychain { action } => cmd_keychain(action),
         Command::Profile { action } => cmd_profile(action),
         Command::Run {
             profile,
@@ -307,9 +322,132 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             // Canonical, as the directories `hush profile use` maps are.
             let cwd = std::env::current_dir()?.canonicalize()?;
             let names = names::collect(&cwd, &vault::global_env_path()?, &secrets)?;
-            run::run(names, profile, &cwd, env, cmd, passphrase)
+            let reason = unlock_reason(&cmd);
+            run::run(names, profile, &cwd, env, cmd, || run_vault(&reason))
         }
     }
+}
+
+/// Completes the system's "hush is trying to ..." line, naming the command,
+/// so a prompt nobody expected says what asked for it. Whoever started
+/// `hush run` chose the command, so control characters, which could lay out
+/// fake lines in the dialog, become spaces, and a long one keeps its start
+/// and its end, so nothing can hide after a cut.
+fn unlock_reason(cmd: &[String]) -> String {
+    const HEAD: usize = 50;
+    const TAIL: usize = 30;
+    let cmd: Vec<char> = cmd
+        .join(" ")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cmd: String = if cmd.len() > HEAD + TAIL {
+        let mut cut: String = cmd[..HEAD].iter().collect();
+        cut.push('…');
+        cut.extend(&cmd[cmd.len() - TAIL..]);
+        cut
+    } else {
+        cmd.into_iter().collect()
+    };
+    format!("open the vault for `hush run -- {cmd}`")
+}
+
+/// The vault for `hush run`: opened with the passphrase from the keychain,
+/// after Touch ID, when `hush keychain enable` saved it, otherwise with a
+/// typed one. Only `hush run` reads the keychain, as it never prints a value
+/// or changes the vault. Anything that goes wrong on the keychain path falls
+/// back to the typed prompt, except a dismissed Touch ID prompt.
+fn run_vault(reason: &str) -> Result<vault::Vault> {
+    #[cfg(target_os = "macos")]
+    if std::env::var_os("HUSH_PASSPHRASE").is_none() && vault::vault_exists()? {
+        use hush::keychain::{self, Unlocked};
+        // A user who never enabled it mustn't lose `hush run` to a keychain
+        // that can't be read.
+        let enabled = keychain::is_enabled().unwrap_or_else(|e| {
+            eprintln!("hush: couldn't check the keychain ({e}); asking for the passphrase");
+            false
+        });
+        if enabled {
+            match keychain::unlock(reason) {
+                Unlocked::Passphrase(pass) => match vault::load_vault(&pass) {
+                    Ok(v) => return Ok(v),
+                    // A vault restored from a backup, say, or a `passwd`
+                    // whose keychain step failed.
+                    Err(_) => eprintln!(
+                        "hush: the passphrase saved in the keychain no longer opens the vault; run `hush keychain enable` again. Asking for the passphrase"
+                    ),
+                },
+                Unlocked::Cancelled => bail!("cancelled, so the vault stays closed"),
+                Unlocked::Failed(why) => eprintln!(
+                    "hush: couldn't unlock with the keychain ({why}); asking for the passphrase"
+                ),
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = reason;
+    vault::load_vault(&passphrase()?)
+}
+
+#[cfg(target_os = "macos")]
+fn cmd_keychain(action: KeychainAction) -> Result<ExitCode> {
+    use hush::keychain;
+    match action {
+        KeychainAction::Enable => {
+            // Refused before the prompt, not after it.
+            keychain::check_hardened()?;
+            eprintln!(
+                "saving the vault passphrase in your login keychain, for `hush run` only; vault changes still ask for it"
+            );
+            let pass = passphrase()?;
+            vault::load_vault(&pass)?;
+            keychain::store(&pass)?;
+            eprintln!(
+                "`hush run` now asks for Touch ID or your login password instead. After you install a new hush, run `hush keychain enable` again. A keychain dialog asking for the `hush` item for any other program, such as `security`, is something trying to read the passphrase: deny it, never Always Allow."
+            );
+        }
+        KeychainAction::Disable => {
+            if keychain::remove()? {
+                eprintln!("removed the saved passphrase; `hush run` asks for it again");
+            } else {
+                eprintln!("no passphrase was saved for this vault");
+            }
+        }
+        KeychainAction::Status => {
+            if keychain::is_enabled()? {
+                println!("saved: `hush run` unlocks with Touch ID or your login password");
+            } else {
+                println!("not saved: `hush run` asks for the passphrase");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// After `passwd`: the saved passphrase no longer opens the vault. Only a
+/// hardened hush may save the new one; otherwise the item is removed rather
+/// than left stale.
+#[cfg(target_os = "macos")]
+fn resave_keychain(new: &str) -> Result<()> {
+    use hush::keychain;
+    if !keychain::is_enabled()? {
+        return Ok(());
+    }
+    if harden::hardened_runtime() {
+        keychain::store(new)?;
+        eprintln!("updated the passphrase saved in the keychain");
+    } else {
+        keychain::remove()?;
+        eprintln!(
+            "removed the passphrase saved in the keychain; run `hush keychain enable` with a hush signed with the hardened runtime"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_keychain(_: KeychainAction) -> Result<ExitCode> {
+    bail!("the keychain unlock is macOS only")
 }
 
 fn passphrase() -> Result<String> {
@@ -373,6 +511,13 @@ fn cmd_passwd() -> Result<ExitCode> {
     check_new_passphrase(&new, &confirm)?;
     vault::save_vault(&vault, &new)?;
     println!("vault passphrase changed");
+    // The vault is re-encrypted by now, so a keychain failure only warns.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = resave_keychain(&new) {
+        eprintln!(
+            "hush: warning: the passphrase saved in the keychain may be stale ({e}); run `hush keychain enable` again, or `hush keychain disable`"
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -953,6 +1098,29 @@ mod tests {
         assert!(mismatch.contains("did not match"), "{mismatch}");
         assert!(!mismatch.contains("super-secret-new"), "{mismatch}");
         assert!(!mismatch.contains("other-secret"), "{mismatch}");
+    }
+
+    #[test]
+    fn unlock_reason_names_the_command_and_cuts_a_long_one() {
+        let cmd = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        assert_eq!(
+            unlock_reason(&cmd("npx some-server")),
+            "open the vault for `hush run -- npx some-server`"
+        );
+        let long = unlock_reason(&cmd(&format!("npx ok{}rm -rf ~", "é".repeat(100))));
+        assert!(
+            long.starts_with("open the vault for `hush run -- npx ok"),
+            "{long}"
+        );
+        assert!(long.ends_with("rm -rf ~`"), "{long}");
+        assert_eq!(long.matches('…').count(), 1, "{long}");
+        assert_eq!(
+            long.chars().filter(|&c| c == 'é').count(),
+            50 - 6 + 30 - 8,
+            "{long}"
+        );
+        let fake = unlock_reason(&cmd("npx a\nmacOS: this request is safe\r\u{1b}[2J"));
+        assert!(!fake.chars().any(char::is_control), "{fake:?}");
     }
 
     #[test]

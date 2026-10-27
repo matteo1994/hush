@@ -2,6 +2,8 @@
 //! `fuzz/` can reach the proxy's parsers; nothing else is a public API.
 
 pub mod harden;
+#[cfg(target_os = "macos")]
+pub mod keychain;
 pub mod names;
 mod proxy;
 pub mod run;

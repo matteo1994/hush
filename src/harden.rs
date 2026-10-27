@@ -76,6 +76,15 @@ pub fn hardened_runtime() -> bool {
     ok && flags & CS_RUNTIME != 0
 }
 
+/// The command that signs this binary with the hardened runtime, naming the
+/// file this process runs from.
+pub fn codesign_hint() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "$(command -v hush)".into());
+    format!("sudo codesign -f -s - -o runtime \"{exe}\"")
+}
+
 /// Printed before any child exists, so it can't land on a child's screen.
 fn warn(what: &str) {
     eprintln!(
