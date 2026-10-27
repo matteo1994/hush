@@ -1,2 +1,4 @@
 /target
-.mile
+# mile: share the plan, keep the index, crew config, current route and crew queue local
+/.mile/*
+!/.mile/routes/

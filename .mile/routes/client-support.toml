@@ -1,0 +1,91 @@
+id = "client-support"
+title = "Client & Protocol Support"
+description = "Traffic and clients hush can't swap for yet, or hasn't verified"
+archived = false
+created_at = "2026-09-27T19:09:48.695104Z"
+
+[[stones]]
+id = "protocols"
+title = "Protocols"
+created_at = "2026-09-27T19:10:08.315801Z"
+
+[[stones.steps]]
+id = "support-websocket-upgrades-to-bound-hosts"
+title = "Support WebSocket upgrades to bound hosts"
+notes = "Intercepted requests currently go upstream with Connection: close"
+status = "todo"
+created_at = "2026-09-27T19:10:08.315804Z"
+
+[[stones.steps]]
+id = "reuse-upstream-connections-for-intercepted-hosts"
+title = "Reuse upstream connections for intercepted hosts"
+notes = "Every intercepted request goes upstream with Connection: close, and only HTTP/1.1 is negotiated; fine for API calls, slow for chatty clients"
+status = "done"
+created_at = "2026-10-02T01:05:09.186602Z"
+completed_at = "2026-10-13T02:23:11Z"
+
+[[stones]]
+id = "client-verification"
+title = "Client verification"
+created_at = "2026-09-27T19:10:08.325739Z"
+
+[[stones.steps]]
+id = "verify-node-24-5-via-node-use-env-proxy-and-node-extra-ca-certs"
+title = "Verify Node 24.5+ via NODE_USE_ENV_PROXY and NODE_EXTRA_CA_CERTS"
+notes = "Only Node 12 was available when HTTPS landed"
+status = "todo"
+created_at = "2026-09-27T19:10:08.325741Z"
+
+[[stones.steps]]
+id = "document-or-work-around-clients-that-ignore-the-ca-env-vars"
+title = "Document or work around clients that ignore the CA env vars"
+notes = "Go on macOS reads only the keychain; pinned clients fail with a TLS error, never leak"
+status = "todo"
+created_at = "2026-09-27T19:10:08.335556Z"
+
+[[stones]]
+id = "windows-support"
+title = "Windows support"
+created_at = "2026-09-29T01:44:41.016080Z"
+
+[[stones.steps]]
+id = "restrict-vault-and-run-dir-access-on-windows"
+title = "Restrict vault and run-dir access on Windows"
+notes = "set_private_mode/set_owner_only are cfg(unix) but called unconditionally. Consider %APPDATA% instead of ~/.config, plus a per-user ACL via windows-sys"
+status = "todo"
+created_at = "2026-09-29T01:44:41.016083Z"
+
+[[stones.steps]]
+id = "keep-hush-run-alive-through-ctrl-c-on-windows"
+title = "Keep hush run alive through Ctrl-C on Windows"
+notes = "Replace libc::signal(SIGINT/SIGQUIT, SIG_IGN) with SetConsoleCtrlHandler returning TRUE, installed after spawning the child"
+status = "todo"
+created_at = "2026-09-29T01:44:41.040637Z"
+
+[[stones.steps]]
+id = "detect-dead-runs-for-the-run-dir-sweep-on-windows"
+title = "Detect dead runs for the run-dir sweep on Windows"
+notes = "Replace libc::kill(pid, 0)/EPERM with OpenProcess + GetExitCodeProcess"
+status = "todo"
+created_at = "2026-09-29T01:44:41.053900Z"
+
+[[stones.steps]]
+id = "port-exit-code-and-no-terminal-handling-to-windows"
+title = "Port exit-code and no-terminal handling to Windows"
+notes = "ExitStatusExt (128+signal) is Unix-only, and Windows always has an exit code. The no-terminal check matches libc::ENXIO; map rpassword's Windows error instead"
+status = "todo"
+created_at = "2026-09-29T01:44:41.067373Z"
+
+[[stones.steps]]
+id = "verify-windows-clients-honor-the-proxy-and-ca-env-vars"
+title = "Verify Windows clients honor the proxy and CA env vars"
+notes = "curl, Python, Node and git; rustls-native-certs reads the Windows cert store"
+status = "todo"
+created_at = "2026-09-29T01:44:41.080210Z"
+
+[[stones.steps]]
+id = "add-windows-latest-to-the-ci-test-matrix"
+title = "Add windows-latest to the CI test matrix"
+notes = "Last step, once the port compiles and the tests pass on Windows"
+status = "todo"
+created_at = "2026-09-29T01:44:41.092176Z"

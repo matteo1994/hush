@@ -1,0 +1,97 @@
+id = "go-public"
+title = "Go public"
+description = "Make the repository ready to switch from private to public: docs that match what hush does, a way to report vulnerabilities, a stable toolchain, then the switch itself and what it unlocks. Finish the profiles steps in usability first."
+archived = false
+created_at = "2026-10-19T02:30:28.929014Z"
+
+[[stones]]
+id = "docs"
+title = "docs"
+created_at = "2026-10-19T02:30:48.631151Z"
+
+[[stones.steps]]
+id = "readme-install-instructions-match-the-threat-model"
+title = "README install instructions match the threat model"
+notes = "Building says cargo install --path . (into ~/.cargo/bin), while the threat model says install where only an administrator can write; and it claims no system dependencies and pure-Rust crypto, but ring needs a C compiler. Fix both."
+status = "done"
+created_at = "2026-10-19T02:30:48.631155Z"
+completed_at = "2026-10-20T02:43:17.815297Z"
+
+[[stones.steps]]
+id = "replace-the-mile-and-typesafe-api-key-examples-with-generic-ones"
+title = "Replace the mile and TYPESAFE_API_KEY examples with generic ones"
+notes = "README (global.env, --secret) and the names.rs doc comment use mile crew / TYPESAFE_API_KEY, which mean nothing outside this setup. Use a generic globally installed tool and key."
+status = "done"
+created_at = "2026-10-19T02:30:48.642328Z"
+completed_at = "2026-10-20T02:42:52.686032Z"
+
+[[stones.steps]]
+id = "add-security-md-with-how-to-report-a-vulnerability-privately"
+title = "Add SECURITY.md with how to report a vulnerability privately"
+notes = "Point at GitHub private vulnerability reporting; say which versions get fixes (latest release) and what's out of scope (the README threat model's non-goals)."
+status = "done"
+created_at = "2026-10-19T02:30:48.654927Z"
+completed_at = "2026-10-20T02:44:52.724954Z"
+
+[[stones]]
+id = "build"
+title = "build"
+created_at = "2026-10-19T02:30:48.667080Z"
+
+[[stones.steps]]
+id = "build-on-a-pinned-stable-toolchain-instead-of-nightly"
+title = "Build on a pinned stable toolchain instead of nightly"
+notes = "Nothing needs nightly: the full suite passes on 1.99.0. Pin 1.99.0 in rust-toolchain.toml so ordinary rustup users can build; fuzz/ keeps nightly (cargo fuzz asks for it). Update CLAUDE.md's toolchain line."
+status = "done"
+created_at = "2026-10-19T02:30:48.667086Z"
+completed_at = "2026-10-20T02:44:52.736007Z"
+
+[[stones]]
+id = "switch"
+title = "switch"
+created_at = "2026-10-19T02:30:48.680301Z"
+
+[[stones.steps]]
+id = "decide-whether-to-strip-the-personal-email-from-git-history"
+title = "Decide whether to strip the personal email from git history"
+notes = "Decided 2026-10-20: keep it. The email stays in the history; no rewrite."
+status = "done"
+created_at = "2026-10-19T02:30:48.680307Z"
+completed_at = "2026-10-20T02:37:36.715892Z"
+
+[[stones.steps]]
+id = "make-the-repository-public"
+title = "Make the repository public"
+notes = "After the steps above and the usability profiles steps. Done by hand in the GitHub settings."
+status = "done"
+created_at = "2026-10-19T02:30:48.707320Z"
+completed_at = "2026-10-20T02:51:07.613404Z"
+
+[[stones]]
+id = "after-public"
+title = "after-public"
+created_at = "2026-10-19T02:30:48.721264Z"
+
+[[stones.steps]]
+id = "bring-back-the-macos-ci-job"
+title = "Bring back the macOS CI job"
+notes = "Public repos get Actions minutes free, so the 10x macOS cost that removed it (#28) is gone. Restore macos-latest in the test matrix and CLAUDE.md's CI line."
+status = "done"
+created_at = "2026-10-19T02:30:48.721272Z"
+completed_at = "2026-10-20T02:51:18Z"
+
+[[stones.steps]]
+id = "require-ci-to-pass-on-master-with-branch-protection"
+title = "Require CI to pass on master with branch protection"
+notes = "Branch protection is only available on public repos on the free plan. Require lint, test and advisories before merging. GitHub settings, done by hand."
+status = "done"
+created_at = "2026-10-19T02:30:48.734995Z"
+completed_at = "2026-10-24T15:10:48.970194Z"
+
+[[stones.steps]]
+id = "turn-on-private-vulnerability-reporting-in-the-repo-settings"
+title = "Turn on private vulnerability reporting in the repo settings"
+notes = "GitHub only offers it on public repos (the API gives 404 while private), so right after making the repo public: Settings > Security (or Code security) > Private vulnerability reporting. SECURITY.md points at it, so don't leave a gap."
+status = "done"
+created_at = "2026-10-19T02:30:48.693951Z"
+completed_at = "2026-10-20T02:51:07.624714Z"

@@ -1,0 +1,71 @@
+id = "maintenance"
+title = "Maintenance"
+description = "Codebase and dependency upkeep"
+archived = false
+created_at = "2026-09-27T19:09:48.704828Z"
+
+[[stones]]
+id = "formatting"
+title = "Formatting"
+created_at = "2026-09-27T19:10:08.344963Z"
+
+[[stones.steps]]
+id = "run-cargo-fmt-across-the-codebase"
+title = "Run cargo fmt across the codebase"
+notes = "Pre-existing drift in every file; do it as its own commit"
+status = "done"
+created_at = "2026-09-27T19:10:08.344965Z"
+completed_at = "2026-10-01T23:17:31.971049Z"
+
+[[stones]]
+id = "dependencies"
+title = "Dependencies"
+created_at = "2026-09-27T19:10:08.354180Z"
+
+[[stones.steps]]
+id = "upgrade-age-once-0-12-is-stable"
+title = "Upgrade age once 0.12 is stable"
+notes = "Drops the proc-macro-error2 future-incompat warning pulled in via i18n-embed-fl"
+status = "done"
+created_at = "2026-09-27T19:10:08.354181Z"
+completed_at = "2026-10-18T22:04:41.038102Z"
+
+[[stones]]
+id = "ci"
+title = "CI"
+created_at = "2026-10-02T00:36:34.632434Z"
+
+[[stones.steps]]
+id = "set-up-ci-with-github-actions"
+title = "Set up CI with GitHub Actions"
+status = "done"
+created_at = "2026-10-02T00:36:34.632436Z"
+completed_at = "2026-10-02T00:36:34.632436Z"
+
+[[stones.steps]]
+id = "pin-a-dated-nightly-in-rust-toolchain-toml"
+title = "Pin a dated nightly in rust-toolchain.toml"
+notes = "Plain 'nightly' lets a new clippy lint under -D warnings turn CI red with no code change; bump the date by hand"
+status = "done"
+created_at = "2026-10-02T01:05:09.198870Z"
+completed_at = "2026-10-18T22:15:45Z"
+
+[[stones]]
+id = "testing"
+title = "Testing"
+created_at = "2026-10-02T01:05:09.211193Z"
+
+[[stones.steps]]
+id = "add-a-binary-level-end-to-end-test-of-hush-run"
+title = "Add a binary-level end-to-end test of hush run"
+notes = "Spawn, Ctrl-C survival, exit codes and the run-dir sweep are only checked by hand; drive the built binary with HOME in a temp dir and a local upstream"
+status = "done"
+created_at = "2026-10-02T01:05:09.211195Z"
+completed_at = "2026-10-18T22:56:21Z"
+
+[[stones.steps]]
+id = "untracked-files-don-t-mark-the-build-dirty"
+title = "Untracked files don't mark the build -dirty"
+notes = "build.rs runs git status --porcelain, which lists untracked files, so a stray .DS_Store makes every local build report -dirty. Use --untracked-files=no, and ignore .DS_Store."
+status = "todo"
+created_at = "2026-10-25T23:31:02.841582Z"
