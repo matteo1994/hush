@@ -1,0 +1,87 @@
+id = "usability"
+title = "Usability"
+description = "Make choosing which secrets a run gets less tedious"
+archived = false
+created_at = "2026-10-02T00:43:45.751051Z"
+
+[[stones]]
+id = "choosing-secrets"
+title = "Choosing secrets"
+created_at = "2026-10-02T00:43:45.760255Z"
+
+[[stones.steps]]
+id = "search-upward-for-env-stopping-at-the-git-root"
+title = "Search upward for .env, stopping at the git root"
+notes = "So hush run works from subdirectories. Outside a git repo, only the current directory is used, so an unrelated parent .env is never picked up"
+status = "done"
+created_at = "2026-10-02T00:43:45.760257Z"
+completed_at = "2026-10-02T00:58:49.530172Z"
+
+[[stones.steps]]
+id = "add-config-hush-global-env-for-secrets-used-by-globally-installed-tools"
+title = "Add ~/.config/hush/global.env for secrets used by globally installed tools"
+notes = "Names only, merged into every hush run; e.g. TYPESAFE_API_KEY for mile crew. .env scopes placeholders, it is not a security boundary: the host binding is"
+status = "done"
+created_at = "2026-10-02T00:43:45.770992Z"
+completed_at = "2026-10-02T00:58:49.542313Z"
+
+[[stones.steps]]
+id = "add-a-repeatable-secret-name-flag-to-hush-run"
+title = "Add a repeatable --secret NAME flag to hush run"
+notes = "For one-off commands without any .env"
+status = "done"
+created_at = "2026-10-02T00:43:45.782247Z"
+completed_at = "2026-10-02T00:58:49.554168Z"
+
+[[stones]]
+id = "profiles"
+title = "profiles"
+created_at = "2026-10-13T02:12:47.685405Z"
+
+[[stones.steps]]
+id = "decide-how-a-project-selects-its-profile"
+title = "Decide how a project selects its profile"
+notes = "Decided 2026-10-18: a directory map in the vault. 'hush profile use NAME' in a project stores its directory (git root, else cwd) → profile, behind the passphrase like any vault change, so an agent can't redirect a run and nothing lands in the repo. --profile overrides it for one run. A moved directory falls back to unprofiled entries with a warning."
+status = "done"
+created_at = "2026-10-13T02:12:47.685407Z"
+completed_at = "2026-10-18T23:47:06.419076Z"
+
+[[stones.steps]]
+id = "store-profiles-in-the-vault"
+title = "Store profiles in the vault"
+notes = "A profile is a named set of entries, each with its own value and bindings, so the same name (e.g. OPENAI_API_KEY) can hold a different key and endpoint per project. Additive format change: vaults written before profiles must still load."
+status = "done"
+created_at = "2026-10-13T02:12:47.700871Z"
+completed_at = "2026-10-19T01:16:34.354514Z"
+
+[[stones.steps]]
+id = "add-profile-to-secret-add-bind-rm-and-ls"
+title = "Add --profile to secret add, bind, rm and ls"
+notes = "Without the flag the commands keep working on the unprofiled entries. ls should show which profile each entry belongs to."
+status = "done"
+created_at = "2026-10-13T02:12:47.712864Z"
+completed_at = "2026-10-19T01:49:24.183299Z"
+
+[[stones.steps]]
+id = "add-profile-to-hush-run"
+title = "Add --profile to hush run"
+notes = "Use the profile's entry for each name and fall back to the unprofiled entry for names the profile doesn't have, so shared keys aren't duplicated. --env keeps selecting the binding inside the chosen entry (stage within project). Warn when the chosen profile doesn't exist in the vault, since Vault::entry then silently falls back to unprofiled entries. The default without --profile (the directory map) belongs to add-hush-profile-use-to-map-a-project-directory-to-a-profile."
+status = "done"
+created_at = "2026-10-13T02:12:47.725592Z"
+completed_at = "2026-10-19T02:25:33.863075Z"
+
+[[stones.steps]]
+id = "document-profiles-in-the-readme-and-threat-model"
+title = "Document profiles in the README and threat model"
+notes = "Usage, plus the point that choosing a profile only scopes which placeholders a run gets; it is not a security boundary."
+status = "done"
+created_at = "2026-10-13T02:12:47.738320Z"
+completed_at = "2026-10-20T02:17:45.722237Z"
+
+[[stones.steps]]
+id = "add-hush-profile-use-to-map-a-project-directory-to-a-profile"
+title = "Add hush profile use to map a project directory to a profile"
+notes = "'hush profile use NAME' maps the git root (else cwd) to NAME in the vault, with the passphrase; 'hush profile use --none' removes the mapping; 'hush profile ls' lists profiles and mapped directories. hush run picks the profile of the nearest mapped directory; --profile overrides it."
+status = "done"
+created_at = "2026-10-18T23:47:06.431781Z"
+completed_at = "2026-10-19T03:45:49.906361Z"

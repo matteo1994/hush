@@ -1,0 +1,137 @@
+id = "break-it"
+title = "Break It"
+description = "White-hat attempts to break hush. The attacker is the hush run child: a prompt-injected agent running as the user, holding the placeholders and the proxy. It wins if it reads a real value, gets one sent to a host it controls, or changes the vault. Each finding becomes a failing test first, then a fix or a line in the threat model."
+archived = false
+created_at = "2026-10-13T03:40:46.338378Z"
+
+[[stones]]
+id = "wire"
+title = "wire"
+created_at = "2026-10-13T03:40:46.348701Z"
+
+[[stones.steps]]
+id = "send-a-bound-host-s-key-to-another-origin-via-the-inner-host-header"
+title = "Send a bound host's key to another origin via the inner Host header"
+notes = "On an intercepted connection hush matches the CONNECT authority only and forwards the inner Host header as the client sent it (handle_connect -> forward). If the bound host is on a shared CDN, CONNECT to it with Host: an attacker site on the same CDN may deliver the real key to the attacker's origin. Likely fix: require the inner Host to equal the CONNECT authority, else no substitution (silent pass-through, not an error)."
+status = "done"
+created_at = "2026-10-13T03:40:46.348704Z"
+completed_at = "2026-10-14T03:44:29Z"
+
+[[stones.steps]]
+id = "capture-a-localhost-bound-key-by-listening-on-another-port"
+title = "Capture a localhost-bound key by listening on another port"
+notes = "Bindings compare host only, not port, and a loopback upstream skips the allow_http check. For a secret bound to localhost or 127.0.0.1 the child can listen on a port of its own, or take the dev server's port while it is down, and ask the proxy to send the key there. Decide: optional port in a binding, or document that loopback bindings are readable by the child."
+status = "done"
+created_at = "2026-10-13T03:40:46.360505Z"
+completed_at = "2026-10-15T02:13:35Z"
+
+[[stones.steps]]
+id = "try-request-smuggling-over-a-kept-alive-intercepted-connection"
+title = "Try request smuggling over a kept-alive intercepted connection"
+notes = "Conflicting Content-Length and Transfer-Encoding, duplicate Content-Length, bare LF, folded headers, chunk extensions. Goal: a request or response the proxy and the upstream frame differently, so a substituted header lands somewhere unintended or a response reaches the client unscrubbed."
+status = "done"
+created_at = "2026-10-13T03:40:46.371595Z"
+completed_at = "2026-10-15T02:59:50.820232Z"
+
+[[stones.steps]]
+id = "try-odd-spellings-of-a-bound-host"
+title = "Try odd spellings of a bound host"
+notes = "Trailing dot, userinfo (http://bound@evil/), IPv6 literals and brackets, mixed case, IDN/punycode, port tricks in split_host_port and resolve_target. Failing closed (no substitution) is fine; look for the matched host and the connected host differing."
+status = "done"
+created_at = "2026-10-13T03:40:46.383243Z"
+completed_at = "2026-10-16T04:39:52.970524Z"
+
+[[stones.steps]]
+id = "fuzz-the-request-head-parser-chunk-decoder-and-scrubber"
+title = "Fuzz the request head parser, chunk decoder and Scrubber"
+notes = "cargo-fuzz targets for read_head, parse_head, parse_response_head, the chunked relay and Scrubber. Look for panics, hangs, unbounded memory, and a real value surviving any split of the input."
+status = "done"
+created_at = "2026-10-13T03:40:46.393284Z"
+completed_at = "2026-10-17T00:17:50.062022Z"
+
+[[stones.steps]]
+id = "capture-a-key-bound-to-this-machine-s-lan-address-by-listening-on-another-port"
+title = "Capture a key bound to this machine's LAN address by listening on another port"
+notes = "A connection to one of this machine's own non-loopback addresses (LAN address, or a name like mymac.local resolving to it) wasn't counted as local, so a binding there without a port and with --allow-http sent the key to any port the child listened on. Fix: Target::this_machine counts peer == local address as local, so only the exact address and port bound gets it (PR #18)."
+status = "done"
+created_at = "2026-10-16T04:10:23.637702Z"
+completed_at = "2026-10-16T04:39:52.981297Z"
+
+[[stones]]
+id = "echo"
+title = "echo"
+created_at = "2026-10-13T03:40:46.403298Z"
+
+[[stones.steps]]
+id = "check-every-response-path-goes-through-the-scrubber"
+title = "Check every response path goes through the Scrubber"
+notes = "101, close-delimited bodies, unparsable response heads passed through to close, trailers, interim 1xx, HEAD, response headers. Use a test upstream that echoes the Authorization header on each path."
+status = "done"
+created_at = "2026-10-13T03:40:46.403305Z"
+completed_at = "2026-10-17T15:21:34.183476Z"
+
+[[stones.steps]]
+id = "check-hush-s-own-output-never-quotes-a-header-or-value"
+title = "Check hush's own output never quotes a header or value"
+notes = "ErrorLog summary after the child exits, 502 bodies, warnings from run and secret commands, panic messages. None may contain a real value, even from an error raised mid-substitution."
+status = "done"
+created_at = "2026-10-13T03:40:46.413325Z"
+completed_at = "2026-10-17T16:08:43.432535Z"
+
+[[stones.steps]]
+id = "document-that-a-vendor-s-key-minting-endpoint-returns-a-key-hush-cannot-scrub"
+title = "Document that a vendor's key-minting endpoint returns a key hush cannot scrub"
+notes = "The child can use the key for anything the vendor API allows, including creating a new API key and reading it from the response. The Scrubber only knows vault values. Threat model text; recommend restricted keys where the vendor offers them."
+status = "done"
+created_at = "2026-10-13T03:40:46.423231Z"
+completed_at = "2026-10-17T18:17:49.669976Z"
+
+[[stones]]
+id = "local"
+title = "local"
+created_at = "2026-10-13T03:40:46.433360Z"
+
+[[stones.steps]]
+id = "try-to-read-the-secrets-from-the-hush-run-process"
+title = "Try to read the secrets from the hush run process"
+notes = "Same user as the child: debugger attach (lldb, task_for_pid), and a core dump forced by signalling the parent (SIGQUIT/SIGABRT). README lists memory reads as out of scope, but cheap mitigations may exist: RLIMIT_CORE 0, PT_DENY_ATTACH on macOS, PR_SET_DUMPABLE 0 on Linux."
+status = "done"
+created_at = "2026-10-13T03:40:46.433372Z"
+completed_at = "2026-10-17T18:37:14.916445Z"
+
+[[stones.steps]]
+id = "tamper-with-the-vault-and-the-run-directory"
+title = "Tamper with the vault and the run directory"
+notes = "Roll vault.age back to an older copy to revive a removed binding, swap or delete vault.age, vault.lock, global.env and the run's ca.pem/ca-bundle.pem, race the tmp-then-rename in save_vault. Check what the vault integrity work already catches."
+status = "done"
+created_at = "2026-10-13T03:40:46.444333Z"
+completed_at = "2026-10-17T18:55:52.847986Z"
+
+[[stones.steps]]
+id = "capture-the-passphrase-for-the-next-run"
+title = "Capture the passphrase for the next run"
+notes = "A fake passphrase prompt printed by the child, a replaced ~/.cargo/bin/hush, a PATH or shell rc edit. A same-user child can do all of these, so this probably ends in threat model text and advice, not a fix."
+status = "done"
+created_at = "2026-10-13T03:40:46.455052Z"
+completed_at = "2026-10-17T19:12:22.831428Z"
+
+[[stones]]
+id = "supply-chain"
+title = "supply-chain"
+created_at = "2026-10-13T03:40:46.465840Z"
+
+[[stones.steps]]
+id = "add-cargo-audit-or-cargo-deny-to-ci"
+title = "Add cargo audit or cargo deny to CI"
+notes = "Fail on known advisories in the dependency tree. Keep mile's CI in step if it gains the same job."
+status = "done"
+created_at = "2026-10-13T03:40:46.465846Z"
+completed_at = "2026-10-17T19:34:31.783040Z"
+
+[[stones.steps]]
+id = "review-the-crates-that-touch-the-secret"
+title = "Review the crates that touch the secret"
+notes = "age, rustls and the ring provider, rcgen, rustls-native-certs (honors SSL_CERT_FILE from the parent's environment), httparse. Check versions, maintenance, and features enabled."
+status = "done"
+created_at = "2026-10-13T03:40:46.476611Z"
+completed_at = "2026-10-17T23:34:18.883633Z"

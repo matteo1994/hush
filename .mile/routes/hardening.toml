@@ -1,0 +1,97 @@
+id = "hardening"
+title = "Hardening"
+description = "Close the remaining ways a real key can leak past hush run"
+archived = false
+created_at = "2026-09-27T19:09:48.686462Z"
+
+[[stones]]
+id = "response-scrubbing"
+title = "Response scrubbing"
+created_at = "2026-09-27T19:10:08.258991Z"
+
+[[stones.steps]]
+id = "strip-accept-encoding-on-requests-to-bound-hosts"
+title = "Strip Accept-Encoding on requests to bound hosts"
+notes = "So responses come back uncompressed and can be scanned"
+status = "done"
+created_at = "2026-09-27T19:10:08.258993Z"
+completed_at = "2026-10-09T01:54:35.881620Z"
+
+[[stones.steps]]
+id = "redact-the-real-value-in-bound-host-responses-with-a-same-length-marker"
+title = "Redact the real value in bound-host responses with a same-length marker"
+notes = "Same length keeps Content-Length and chunk sizes valid; covers headers and body"
+status = "done"
+created_at = "2026-09-27T19:10:08.268866Z"
+completed_at = "2026-10-09T01:54:35.893947Z"
+
+[[stones.steps]]
+id = "catch-a-key-split-across-reads-with-a-carry-over-buffer"
+title = "Catch a key split across reads with a carry-over buffer"
+notes = "Hold back len(key)-1 bytes between reads"
+status = "done"
+created_at = "2026-09-27T19:10:08.277218Z"
+completed_at = "2026-10-09T01:54:35.905575Z"
+
+[[stones]]
+id = "plain-http"
+title = "Plain HTTP"
+created_at = "2026-09-27T19:10:08.285652Z"
+
+[[stones.steps]]
+id = "swap-over-plain-http-only-when-the-target-is-loopback"
+title = "Swap over plain HTTP only when the target is loopback"
+notes = "Otherwise the real key crosses the network unencrypted"
+status = "done"
+created_at = "2026-09-27T19:10:08.285653Z"
+completed_at = "2026-10-09T01:54:35.851798Z"
+
+[[stones.steps]]
+id = "add-an-allow-http-binding-flag-off-by-default"
+title = "Add an --allow-http binding flag, off by default"
+notes = "serde default false keeps existing vaults working"
+status = "done"
+created_at = "2026-09-27T19:10:08.295686Z"
+completed_at = "2026-10-09T01:54:35.868424Z"
+
+[[stones]]
+id = "vault-change-confirmation"
+title = "Vault change confirmation"
+created_at = "2026-09-27T19:10:08.306474Z"
+
+[[stones.steps]]
+id = "evaluate-touch-id-confirmation-for-vault-changes"
+title = "Evaluate Touch ID confirmation for vault changes"
+notes = "A child can't fake it, unlike the HUSH_ACTIVE warning; likely needs a code-signed binary. Could also replace the per-run passphrase Spike 2026-10-25: a Touch ID-gated keychain item needs a paid Developer ID and a provisioning profile (unsigned: -34018; ad-hoc with the entitlement: killed). An LAContext check plus a plain login-keychain item works unsigned once hush has the hardened runtime; see agent-apps' prompt-for-the-passphrase-without-a-terminal."
+status = "todo"
+created_at = "2026-09-27T19:10:08.306477Z"
+benched_at = "2026-10-14T03:38:19.272342Z"
+
+[[stones]]
+id = "vault-integrity"
+title = "Vault integrity"
+created_at = "2026-10-02T01:05:09.149471Z"
+
+[[stones.steps]]
+id = "refuse-a-second-binding-for-the-same-env-instead-of-ignoring-it"
+title = "Refuse a second binding for the same env instead of ignoring it"
+notes = "find_binding takes the first match, so 'secret bind NAME --host X' without --env, when an unscoped binding exists, is accepted but never used. Reject it and suggest --env"
+status = "done"
+created_at = "2026-10-02T01:05:09.149474Z"
+completed_at = "2026-10-09T01:59:17Z"
+
+[[stones.steps]]
+id = "confirm-before-secret-add-overwrites-an-existing-secret"
+title = "Confirm before secret add overwrites an existing secret"
+notes = "Today add silently replaces the value and every binding"
+status = "done"
+created_at = "2026-10-02T01:05:09.163315Z"
+completed_at = "2026-10-09T01:59:17Z"
+
+[[stones.steps]]
+id = "lock-the-vault-during-load-modify-save"
+title = "Lock the vault during load-modify-save"
+notes = "Two concurrent secret commands: the last writer wins"
+status = "done"
+created_at = "2026-10-02T01:05:09.174836Z"
+completed_at = "2026-10-09T01:59:17Z"

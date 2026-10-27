@@ -1,0 +1,104 @@
+id = "key-rotation"
+title = "Key rotation"
+description = "Rotate a secret's value and the vault passphrase without rebinding, track when keys were rotated, and keep scrubbing a retired value for a while afterwards. Open PRs #43, #44 and #45 (#44 and #45 are stacked on #43)."
+archived = false
+created_at = "2026-10-24T15:50:58.227957Z"
+
+[[stones]]
+id = "rotate"
+title = "rotate"
+created_at = "2026-10-24T15:50:58.251065Z"
+
+[[stones.steps]]
+id = "hush-secret-set-replaces-a-value-and-keeps-its-bindings"
+title = "hush secret set replaces a value and keeps its bindings"
+notes = "PR #43 (cursor/secret-set-and-passwd-d93c, base master, CI green). --profile, --stdin (trims one trailing newline, refuses a tty). Also bumps rustls-webpki to 0.103.16 and adds deny.toml ignores for RUSTSEC-2026-0374/0387."
+status = "done"
+created_at = "2026-10-24T15:50:58.284442Z"
+completed_at = "2026-10-24T19:39:22.389339Z"
+
+[[stones.steps]]
+id = "hush-passwd-re-encrypts-the-vault-under-a-new-passphrase"
+title = "hush passwd re-encrypts the vault under a new passphrase"
+notes = "PR #43. HUSH_NEW_PASSPHRASE for scripting, stripped from the hush run child. A wrong current or a refused new passphrase leaves vault.age byte-for-byte unchanged."
+status = "done"
+created_at = "2026-10-24T15:50:58.298587Z"
+completed_at = "2026-10-24T19:39:22.401613Z"
+
+[[stones]]
+id = "bookkeeping"
+title = "bookkeeping"
+created_at = "2026-10-24T15:50:58.262082Z"
+
+[[stones.steps]]
+id = "record-when-a-secret-was-rotated-and-show-its-age-in-secret-ls"
+title = "Record when a secret was rotated and show its age in secret ls"
+notes = "PR #44 (stacked on #43). rotated_at and max_age_secs on SecretEntry, serde default and skipped when unset, so an old vault round-trips."
+status = "done"
+created_at = "2026-10-24T15:50:58.311367Z"
+completed_at = "2026-10-24T20:10:14.468687Z"
+
+[[stones.steps]]
+id = "hush-run-warns-when-a-secret-it-hands-out-is-past-its-max-age"
+title = "hush run warns when a secret it hands out is past its --max-age"
+notes = "PR #44. --max-age 90d on add/set, --max-age none clears it. The warning names the secret and ages, never the value; the secret is still injected."
+status = "done"
+created_at = "2026-10-24T15:50:58.323197Z"
+completed_at = "2026-10-24T20:10:14.479960Z"
+
+[[stones.steps]]
+id = "hush-secret-unbind-removes-one-binding-and-keeps-the-secret"
+title = "hush secret unbind removes one binding and keeps the secret"
+notes = "PR #44. Host compare case-insensitive with port; a host bound for several envs needs --env. The secret bind 'already bound' error points at unbind."
+status = "done"
+created_at = "2026-10-24T15:50:58.334459Z"
+completed_at = "2026-10-24T20:10:14.491140Z"
+
+[[stones]]
+id = "grace-period"
+title = "grace-period"
+created_at = "2026-10-24T15:50:58.273001Z"
+
+[[stones.steps]]
+id = "secret-set-keep-old-keeps-scrubbing-the-previous-value-from-responses-for-a-window"
+title = "secret set --keep-old keeps scrubbing the previous value from responses for a window"
+notes = "PR #45 (stacked on #43, separate from #44; both add fields to SecretEntry, so whichever lands second needs a rebase). Retired values go into real_values only, never substituted. Written against the pre-#42 scrubber: #42 has since merged, so rebase onto it (the PR says the integration point is the retired field plus real_values)."
+status = "done"
+created_at = "2026-10-24T15:50:58.346014Z"
+completed_at = "2026-10-24T20:33:34.658564Z"
+
+[[stones]]
+id = "sharing"
+title = "sharing"
+created_at = "2026-10-24T20:32:48.673214Z"
+
+[[stones.steps]]
+id = "hush-secret-cp-copies-an-entry-between-profiles-and-the-default"
+title = "hush secret cp copies an entry between profiles and the default"
+notes = "Whole entry: value, bindings, rotated_at, max_age_secs, retired. --from/--to profile, --to-default/--from-default for the unprofiled set. Refuses to overwrite without --force. Passphrase, prints the change first."
+status = "done"
+created_at = "2026-10-24T20:32:48.685696Z"
+completed_at = "2026-10-25T21:25:56.683682Z"
+
+[[stones.steps]]
+id = "hush-secret-mv-moves-an-entry-between-profiles-and-the-default"
+title = "hush secret mv moves an entry between profiles and the default"
+notes = "Same as cp, then removes the source; a profile left empty is dropped like secret rm does (its directory mappings kept)."
+status = "done"
+created_at = "2026-10-24T20:32:48.696821Z"
+completed_at = "2026-10-25T21:25:56.702563Z"
+
+[[stones.steps]]
+id = "secret-set-names-other-entries-that-still-hold-the-old-value"
+title = "secret set names other entries that still hold the old value"
+notes = "So a rotation of a copied key isn't left half-done. Names profiles only, never the value."
+status = "done"
+created_at = "2026-10-24T20:32:48.708331Z"
+completed_at = "2026-10-25T21:25:56.713177Z"
+
+[[stones.steps]]
+id = "secret-add-force-names-other-entries-that-still-hold-the-old-value"
+title = "secret add --force names other entries that still hold the old value"
+notes = "From the PR #47 review: add --force replaces the value like set does, but without set's 'held the same value' notice (Vault::others_with_value). Also refuse an empty value in secret add, as set does."
+status = "todo"
+created_at = "2026-10-25T23:31:02.728776Z"

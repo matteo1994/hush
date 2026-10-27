@@ -1,0 +1,110 @@
+id = "agent-apps"
+title = "Agent apps"
+description = "Run hush under AI agent apps people start from the Dock or Spotlight rather than a terminal, on macOS only (Linux keeps the terminal flow): the Claude desktop app's MCP servers first, then VS Code with the Claude Code extension, Cursor, Windsurf, Zed. These apps start their child processes with no terminal for the passphrase prompt, single-instance apps hand a second launch to the running one, and Chromium-based ones ignore HTTPS_PROXY and trust only the Keychain. Apps that sign in with an account (Claude chat, Copilot) or route a user's key through their own servers (Cursor) have no key hush can swap."
+archived = false
+created_at = "2026-10-19T02:31:03.926679Z"
+
+[[stones]]
+id = "research"
+title = "research"
+created_at = "2026-10-19T02:31:04.069761Z"
+
+[[stones.steps]]
+id = "survey-how-each-agent-app-reaches-its-model-api"
+title = "Survey how each agent app reaches its model API"
+notes = "For Cursor, VS Code (Claude Code, Copilot, Cline extensions), Windsurf, Zed, the Claude desktop app and JetBrains: which process sends the request (renderer, Node extension host, a spawned CLI), whether it honors HTTP(S)_PROXY, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, whether it is single-instance (a second launch hands off to the running one, without hush's env), and where the key is configured. Write the table to docs/agent-apps.md. Overlaps client-support's 'clients that ignore the CA env vars'. Found 2026-10-25: Claude desktop's chat and GitHub Copilot sign in with an account, so there is no key to swap (out of scope); Claude desktop's MCP servers work under hush run (see the mcp-servers step); Cursor reportedly sends even a user's own key through its servers, to verify."
+status = "todo"
+created_at = "2026-10-19T02:31:04.069765Z"
+
+[[stones]]
+id = "launching"
+title = "launching"
+created_at = "2026-10-19T02:31:04.080489Z"
+
+[[stones.steps]]
+id = "launch-a-gui-app-under-hush-run-refusing-when-it-is-already-running"
+title = "Launch a GUI app under hush run, refusing when it is already running"
+notes = "e.g. hush run -- /Applications/Cursor.app/Contents/MacOS/Cursor. 'open -a' doesn't work: LaunchServices starts the app with launchd's environment, not hush's. A single-instance app that's already running receives the launch and keeps its old environment, so detect that and refuse with a clear message."
+status = "todo"
+created_at = "2026-10-19T02:31:04.080493Z"
+
+[[stones.steps]]
+id = "prompt-for-the-passphrase-without-a-terminal"
+title = "hush run unlocks the vault with Touch ID and the login keychain when there is no terminal"
+notes = "Design from the 2026-10-25 spike (Intel MBP, macOS 15.8.1, unsigned binary): a Touch ID-gated keychain item (data-protection keychain, or kSecAttrAccessControl with biometry) fails with -34018 missing entitlement, and ad-hoc signing with keychain-access-groups is killed at launch; that route needs a paid Developer ID and a provisioning profile, so it is out for now. What works: a plain login-keychain generic password, which only the binary that created it reads without a prompt (another program, or the same path rebuilt with different code, gets a SecurityAgent dialog), plus LAContext deviceOwnerAuthenticationWithBiometrics, which works unsigned. Plan: 'hush keychain enable' takes the passphrase once and stores it; 'hush keychain disable' removes it. Only 'hush run' with no terminal uses it, after a Touch ID check; every vault change still needs the typed passphrase, so an agent that runs hush itself cannot rebind a key. Each hush upgrade asks once for the login password. Only a hush signed with the hardened runtime may create the item (see sign-the-macos-binary-ad-hoc-with-the-hardened-runtime): an unsigned hush loads DYLD_INSERT_LIBRARIES code that could read it and skip Touch ID. The protection is the OS refusing the library plus the item trusting only that signed binary; harden::hardened_runtime asks the process itself, so it may refuse an honest unsigned hush with a clear message but is never the boundary (PR #48 review). Open: several wrapped MCP servers starting at once would each ask for Touch ID."
+status = "done"
+created_at = "2026-10-19T02:31:04.091630Z"
+completed_at = "2026-10-27T02:18:46.824159Z"
+
+[[stones.steps]]
+id = "make-a-launcher-that-starts-an-app-through-hush"
+title = "Make a launcher that starts an app through hush"
+notes = "macOS only: e.g. 'hush app add Cursor' writes a small .app bundle to ~/Applications that runs hush run on the app's binary, so it opens from the Dock or Spotlight. 'open -a' doesn't work: LaunchServices starts the app with launchd's environment. It must not write the passphrase anywhere."
+status = "todo"
+created_at = "2026-10-19T02:31:04.103954Z"
+
+[[stones.steps]]
+id = "start-a-separate-app-instance-with-its-own-profile-directory-under-hush-run"
+title = "Start a separate app instance with its own profile directory under hush run"
+notes = "A single-instance app that's already running receives a new launch and keeps its old environment. VS Code and Electron apps accept --user-data-dir, which starts a separate instance with hush's env; prefer that, and refuse only when the app has no such option."
+status = "todo"
+created_at = "2026-10-25T22:40:44.592652Z"
+
+[[stones.steps]]
+id = "sign-the-macos-binary-ad-hoc-with-the-hardened-runtime"
+title = "Sign the macOS binary ad-hoc with the hardened runtime"
+notes = "Spike 2026-10-25: DYLD_INSERT_LIBRARIES injects code into the unsigned hush (and any unsigned binary); 'codesign -s - -o runtime' (no Apple account) blocks it, hush still runs, and plain keychain items still work. README's Installing already gives the codesign line; hush is built from source, so CI has no release binary to sign. Done here: harden::hardened_runtime (csops CS_RUNTIME), a one-time warning before the first prompt of an unhardened hush, and DYLD_INSERT_LIBRARIES in the threat model. The keychain unlock will refuse without it."
+status = "done"
+created_at = "2026-10-25T23:24:42.017071Z"
+completed_at = "2026-10-25T23:55:29.137241Z"
+
+[[stones.steps]]
+id = "one-touch-id-prompt-covers-mcp-servers-started-together"
+title = "One Touch ID prompt covers MCP servers started together"
+notes = "Claude desktop starts every configured MCP server at launch; with three wrapped in hush run, each would ask for Touch ID. Options: reuse an LAContext approval for a short window (LAContext touchIDAuthenticationAllowableReuseDuration is per context, so it doesn't carry across processes), or a short-lived unlock shared by runs started within seconds of each other. Must not give a later, unrelated hush run a silent unlock. Seen 2026-10-26: Claude desktop (3.6556.2) starts each configured server twice (two hush run processes, via its 'disclaimer' helper), so even one wrapped server asks for Touch ID twice per app launch."
+status = "todo"
+created_at = "2026-10-25T23:31:02.712649Z"
+
+[[stones]]
+id = "trust"
+title = "trust"
+created_at = "2026-10-19T02:31:04.115116Z"
+
+[[stones.steps]]
+id = "get-chromium-based-apps-to-use-the-proxy-and-trust-the-run-s-ca"
+title = "Get Chromium-based apps to use the proxy and trust the run's CA"
+notes = "Electron renderers use Chromium's network stack: on macOS it uses the system proxy and keychain, not env vars. Candidates: --proxy-server and --ignore-certificate-errors-spki-list (would need one leaf key per run, so a single SPKI hash covers every host), or only supporting apps whose requests go through Node (NODE_USE_ENV_PROXY, NODE_EXTRA_CA_CERTS). Depends on the survey."
+status = "todo"
+created_at = "2026-10-19T02:31:04.115120Z"
+
+[[stones.steps]]
+id = "stable-placeholders-for-keys-an-app-stores-in-its-own-settings"
+title = "Stable placeholders for keys an app stores in its own settings"
+notes = "Apps like Cline or Zed keep a pasted key in their settings and send it every request, but hush mints a new random placeholder each run, so a pasted one stops matching. A placeholder fixed per secret (and profile) would work; it is only swapped toward the bound host, so it looks harmless, but check the threat model (it persists in app config, and a leaked one names which secret it is)."
+status = "todo"
+created_at = "2026-10-25T22:40:44.579735Z"
+
+[[stones]]
+id = "docs"
+title = "docs"
+created_at = "2026-10-19T02:31:04.126434Z"
+
+[[stones.steps]]
+id = "document-starting-each-supported-app-with-hush"
+title = "Document starting each supported app with hush"
+notes = "README section per app that works: how to start it, what's verified, and the ones that don't work yet and why."
+status = "todo"
+created_at = "2026-10-19T02:31:04.126440Z"
+
+[[stones]]
+id = "mcp-servers"
+title = "mcp-servers"
+created_at = "2026-10-25T22:40:44.547759Z"
+
+[[stones.steps]]
+id = "claude-desktop-s-mcp-servers-run-under-hush-with-no-key-in-claude-desktop-config-json"
+title = "Claude desktop's MCP servers run under hush with no key in claude_desktop_config.json"
+notes = "Verified 2026-10-25 (Claude 3.6556.2, hush 0.1.25): an mcpServers entry with command /Users/…/.cargo/bin/hush and args [run, --secret NAME, --, python3, server.py] works started from the Dock. The server gets the placeholder, HTTPS_PROXY and SSL_CERT_FILE; stdio passes through; stderr stays quiet; a postman-echo request was swapped and the echo scrubbed. The app hands MCP servers the login shell's PATH. Only blocker: the test passed HUSH_PASSPHRASE in the entry's env, so done means no passphrase or key in the config (needs prompt-for-the-passphrase-without-a-terminal), plus a README recipe."
+status = "done"
+created_at = "2026-10-25T22:40:44.547767Z"
+completed_at = "2026-10-27T02:18:46.847760Z"

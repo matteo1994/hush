@@ -1,0 +1,70 @@
+id = "performance"
+title = "Performance"
+description = "Time hush and keep it under control. Baseline 2026-10-15 (0.1.5, throwaway vault, macOS): hush run with no names 52 ms; with one secret ~1.3 s, nearly all of it age's scrypt unlock (secret ls alone ~1.38 s); claude --version 58 ms direct vs 1271 ms via hush. Every change is measured against the bench script before and after."
+archived = false
+created_at = "2026-10-15T02:42:33.805529Z"
+
+[[stones]]
+id = "measure"
+title = "measure"
+created_at = "2026-10-15T02:42:33.814945Z"
+
+[[stones.steps]]
+id = "print-start-up-phase-timings-with-hush-timings-1"
+title = "Print start-up phase timings with HUSH_TIMINGS=1"
+notes = "Durations only, on stderr, never values or names: passphrase prompt, vault unlock, mint, system roots, CA, trust files, proxy start, spawn. Off by default."
+status = "todo"
+created_at = "2026-10-15T02:42:33.814947Z"
+
+[[stones.steps]]
+id = "add-a-bench-script-for-start-up-requests-and-streaming"
+title = "Add a bench script for start-up, requests and streaming"
+notes = "Script in the repo, run with a throwaway HOME: start-up with and without names, first and repeated request through an intercepted connection and a blind tunnel vs direct, and the delay of each event on a streamed response from a bound host. Prints a table to compare before and after a change."
+status = "todo"
+created_at = "2026-10-15T02:42:33.825598Z"
+
+[[stones.steps]]
+id = "catch-proxy-performance-regressions-in-ci"
+title = "Catch proxy performance regressions in CI"
+notes = "In-process measurements only (no network, no scrypt): requests per connection, time to first byte, streaming delay through the Scrubber. Generous limits so CI runners don't flake; a regression should fail the build, not be noticed later."
+status = "todo"
+created_at = "2026-10-15T02:42:33.836927Z"
+
+[[stones]]
+id = "startup"
+title = "startup"
+created_at = "2026-10-15T02:42:33.848001Z"
+
+[[stones.steps]]
+id = "decide-the-vault-unlock-cost"
+title = "Decide the vault unlock cost"
+notes = "age's scrypt is tuned to about a second and is ~1.2 s of the ~1.3 s start-up. Options: keep it, lower the work factor, or unlock with a key held in the macOS Keychain behind Touch ID (ties into the benched hardening step evaluate-touch-id-confirmation-for-vault-changes). Security trade-off: the user decides."
+status = "todo"
+created_at = "2026-10-15T02:42:33.848004Z"
+
+[[stones.steps]]
+id = "overlap-start-up-work-with-the-passphrase-prompt-and-unlock"
+title = "Overlap start-up work with the passphrase prompt and unlock"
+notes = "Load system roots, generate the CA and write trust files on another thread while the passphrase is typed and the vault decrypted. Measure first; expected gain is under 100 ms."
+status = "todo"
+created_at = "2026-10-15T02:42:33.858600Z"
+
+[[stones]]
+id = "in-session"
+title = "in-session"
+created_at = "2026-10-15T02:42:33.869707Z"
+
+[[stones.steps]]
+id = "hold-back-only-bytes-that-could-start-a-key-in-the-scrubber"
+title = "Hold back only bytes that could start a key in the Scrubber"
+notes = "Scrubber::feed keeps the last longest-1 bytes of every write until more data or the end arrives, so on a streamed response from a bound host each event's tail arrives one event late. Hold back only the longest suffix that is a prefix of some real value: just as safe, and events are released on time."
+status = "done"
+created_at = "2026-10-15T02:42:33.869711Z"
+completed_at = "2026-10-25T23:31:02.854841Z"
+
+[[stones.steps]]
+id = "measure-per-request-overhead-on-intercepted-and-tunneled-connections"
+title = "Measure per-request overhead on intercepted and tunneled connections"
+notes = "Time to first byte through an intercepted connection, a blind tunnel and direct; include the leaf certificate generated on the first connection to each host and the thread per connection. Fix what the numbers point at."
+status = "todo"
+created_at = "2026-10-15T02:42:33.880869Z"
