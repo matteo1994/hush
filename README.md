@@ -1,5 +1,10 @@
 # hush
 
+[![CI](https://github.com/matteo1994/hush/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/matteo1994/hush/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/matteo1994/hush?sort=semver&label=version)](CHANGELOG.md)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+
 A local, placeholder-swap credential proxy that keeps real API keys out of an AI coding agent's own context, memory, and transcript.
 
 ## Scope: HTTP(S) header-based API keys only
