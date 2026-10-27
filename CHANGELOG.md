@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.27 (2026-10-27)
+
+- Unlock hush run with Touch ID on macOS so agent apps can start it (#49)
+
 ## 0.1.26 (2026-10-25)
 
 - Warn on macOS when hush isn't signed with the hardened runtime (#48)
