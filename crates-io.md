@@ -14,7 +14,7 @@ This page is the short version. The [full README](https://github.com/matteo1994/
 
 Secrets live in a vault encrypted with a passphrase (age), and every change to a secret, or to where it may be sent, needs that passphrase, which nothing inside `hush run` ever gets.
 
-**Scope:** static HTTP(S) header credentials only, such as `Authorization: Bearer …` or an API-key header. Not database credentials, SSH keys, or signed requests like AWS SigV4. See [Scope](https://github.com/matteo1994/hush#scope-https-header-based-api-keys-only) and [Current scope](https://github.com/matteo1994/hush#current-scope-v0) for what clients work.
+**Scope:** static HTTP(S) header credentials only, such as `Authorization: Bearer …` or an API-key header. Not database credentials, SSH keys, or signed requests like AWS SigV4. See [Scope](https://github.com/matteo1994/hush#scope-https-header-based-api-keys-only) and [Current scope](https://github.com/matteo1994/hush#current-scope-v0) for which clients work.
 
 ## Install
 
@@ -28,7 +28,7 @@ sudo install -m 755 "$build/bin/hush" /opt/hush/bin/
 rm -rf "$build"
 ```
 
-Then put `/opt/hush/bin` first on your `PATH`. On macOS, also sign it with the hardened runtime after each install, which refuses debugger reads and injected libraries:
+Then put `/opt/hush/bin` first on your `PATH` (`export PATH="/opt/hush/bin:$PATH"` in your shell's startup file). On macOS, also sign it with the hardened runtime after each install, which refuses debugger reads and injected libraries:
 
 ```bash
 sudo codesign -f -s - -o runtime /opt/hush/bin/hush
@@ -42,7 +42,7 @@ Why both matter: [Installing](https://github.com/matteo1994/hush#installing).
 hush init                                              # create the vault, set its passphrase
 hush secret add BILLING_API_KEY --host api.example.com # prompts for the value, hidden
 hush secret ls                                         # names and bindings, never values
-hush run -- python billing_client.py                   # the names in .env get placeholders
+hush run -- python billing_client.py                   # the _KEY names in .env get placeholders
 hush run --secret OPENAI_API_KEY -- claude             # an agent and everything it starts
 ```
 
