@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.29 (2026-10-31)
+
+- Show a short page on crates.io that links to the full README on GitHub. (#53)
+
 ## 0.1.28 (2026-10-27)
 
 - Share the mile plan: track .mile/routes and keep the rest of .mile local. (#50)

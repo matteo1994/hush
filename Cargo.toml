@@ -1,6 +1,6 @@
 [package]
 name = "hush-secrets"
-version = "0.1.28"
+version = "0.1.29"
 edition = "2024"
 # cargo install ignores rust-toolchain.toml; File::lock needs 1.89.
 rust-version = "1.89"
