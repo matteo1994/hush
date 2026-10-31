@@ -178,7 +178,7 @@ VS Code started by `hush run` passes the placeholders, proxy and CA variables on
 
 ```bash
 mkdir -p ~/.vscode-hush/User
-echo '{ "http.fetchAdditionalSupport": false }' > ~/.vscode-hush/User/settings.json
+[ -e ~/.vscode-hush/User/settings.json ] || echo '{ "http.fetchAdditionalSupport": false }' > ~/.vscode-hush/User/settings.json
 hush run --secret ANTHROPIC_API_KEY -- "/Applications/Visual Studio Code.app/Contents/MacOS/Code" --user-data-dir ~/.vscode-hush
 ```
 
@@ -187,7 +187,7 @@ hush run --secret ANTHROPIC_API_KEY -- "/Applications/Visual Studio Code.app/Con
 - **`http.fetchAdditionalSupport: false`** makes `fetch` in extensions trust the run's CA. With VS Code's default, an extension's `fetch` to a bound host fails with a certificate error (nothing leaks); Node's `https` works either way.
 - **Name the secrets with `--secret` or `global.env`.** One VS Code serves many projects, so a project's `.env` is a poor fit.
 
-This covers extensions that read their key from the environment, such as Claude Code (`ANTHROPIC_API_KEY`) and Codex (`OPENAI_API_KEY`). A key you pasted into an extension's settings (Cline, Continue, Copilot's own-key models) is the real key, kept in the keychain, and hush never sees it. `hush run` refuses to start in the integrated terminal, which already has the placeholders. `scripts/vscode-check/run.sh` checks your VS Code: it starts it under `hush run` with a throwaway profile and the setting above, sends a key bound to postman-echo each way an extension can, and prints what arrived. Check an extension itself once with a key bound to an echo service, as under *A bound host that echoes the key back*. [docs/agent-apps.md](docs/agent-apps.md) has what was tested and how other agent apps compare.
+This covers extensions that read their key from the environment, such as Claude Code (`ANTHROPIC_API_KEY`) and Codex (`OPENAI_API_KEY`). A key you pasted into an extension's settings (Cline, Continue, Copilot's own-key models) is the real key, kept in the keychain, and hush never sees it. `hush run` refuses to start in the integrated terminal, which already has the placeholders. `scripts/vscode-check/run.sh` checks your VS Code: it starts it under `hush run` with a throwaway profile and the setting above, sends a key bound to postman-echo each way an extension can, checks the integrated terminal has the placeholder, and prints the results. Bind a throwaway value first, since hush sends the real value to the echo service: `HUSH_SECRET_VALUE=not-a-real-key hush secret add HUSH_CHECK --host postman-echo.com`. Check an extension itself once with a key bound to an echo service, as under *A bound host that echoes the key back*. [docs/agent-apps.md](docs/agent-apps.md) has what was tested and how other agent apps compare.
 
 ## Without a terminal: agent apps on macOS
 

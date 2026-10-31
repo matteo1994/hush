@@ -80,16 +80,24 @@ function viaTerminal() {
 
 async function activate() {
   const results = {};
+  const finish = () => {
+    fs.writeFileSync(out, Object.entries(results).map(([name, result]) => `${name}: ${result}\n`).join(''));
+    setTimeout(() => vscode.commands.executeCommand('workbench.action.quit'), 500);
+  };
+  // Each check times out on its own; this catches anything that still hangs,
+  // and the check it hangs in reads 'did not finish'.
+  const watchdog = setTimeout(() => { finish(); }, 90000);
   if (!key.startsWith('hush_ph_')) {
     results.environment = `no placeholder in $${process.env.CHECK_SECRET}: is it in the vault?`;
   } else {
     for (const [name, check] of [['https', viaHttps], ['fetch', viaFetch], ['child process', viaNodeChild],
                                  ['curl', viaCurl], ['terminal', viaTerminal]]) {
-      results[name] = await check();
+      results[name] = 'did not finish';
+      try { results[name] = await check(); } catch (e) { results[name] = 'error: ' + e.message; }
     }
   }
-  fs.writeFileSync(out, Object.entries(results).map(([name, result]) => `${name}: ${result}\n`).join(''));
-  setTimeout(() => vscode.commands.executeCommand('workbench.action.quit'), 500);
+  clearTimeout(watchdog);
+  finish();
 }
 
 module.exports = { activate, deactivate() {} };

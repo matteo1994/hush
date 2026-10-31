@@ -8,6 +8,7 @@
 # SECRET (default HUSH_CHECK) must be bound to the echo service at URL
 # (default https://postman-echo.com/headers), for instance:
 #   HUSH_SECRET_VALUE=not-a-real-key hush secret add HUSH_CHECK --host postman-echo.com
+# Use a throwaway value: hush sends the real value to the echo service.
 # Uses a temporary VS Code profile, so it runs beside your usual VS Code,
 # and the settings the README recommends. VSCODE_BIN and HUSH_BIN override
 # where VS Code and hush are found.
@@ -24,6 +25,13 @@ profile=$(mktemp -d /tmp/hush-vscode.XXXXXX)
 trap 'rm -rf "$profile"' EXIT
 mkdir -p "$profile/User"
 echo '{ "http.fetchAdditionalSupport": false }' > "$profile/User/settings.json"
+
+# Quits VS Code if it never gets to the results, say because the extension
+# didn't load.
+( sleep 150; pkill -f -- "--user-data-dir $profile" ) > /dev/null 2>&1 &
+watchdog=$!
+disown
+trap 'kill "$watchdog" 2>/dev/null; rm -rf "$profile"' EXIT
 
 CHECK_SECRET=$secret CHECK_URL=$url CHECK_OUT=$profile/results \
     "$hush" run --secret "$secret" -- "$vscode" --new-window --user-data-dir "$profile" \

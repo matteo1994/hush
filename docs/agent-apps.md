@@ -71,7 +71,7 @@ Two side effects:
 
 [codex-key]: https://developers.openai.com/codex/guides/api-key
 [cline-secrets]: https://agent-safehouse.dev/docs/agent-investigations/cline
-[continue]: https://gitea.varghacsongor.hu/GithubMirror/continue/src/commit/35335ba6e7f6b07f69c671d681dcb072e5795bf7/docs/docs/yaml-reference.md
+[continue]: https://docs.continue.dev/reference
 [copilot-byok]: https://github.blog/changelog/2026-04-22-bring-your-own-language-model-key-in-vs-code-now-available/
 [cursor-byok]: https://cursor.com/help/models-and-usage/api-keys
 [windsurf]: https://kitemetric.com/blogs/unlocking-anthropic-s-opus-sonnet-4-in-windsurf-a-byok-guide
