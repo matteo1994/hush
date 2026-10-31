@@ -7,12 +7,13 @@ rust-version = "1.89"
 license = "Apache-2.0"
 description = "A placeholder-swap credential proxy that keeps real API keys out of an AI coding agent's environment, context and transcript"
 repository = "https://github.com/matteo1994/hush"
-readme = "README.md"
+# crates.io shows this short page; it links to the full README on GitHub.
+readme = "crates-io.md"
 keywords = ["secrets", "proxy", "api-keys", "ai-agents", "credentials"]
 categories = ["command-line-utilities", "cryptography", "network-programming"]
 # The crate is published as hush-secrets (hush was taken); the program and the
 # library the fuzz targets use are still called hush.
-include = ["/src", "/tests", "/build.rs", "/Cargo.lock", "/README.md", "/LICENSE", "/SECURITY.md", "/CHANGELOG.md"]
+include = ["/src", "/tests", "/build.rs", "/Cargo.lock", "/README.md", "/crates-io.md", "/LICENSE", "/SECURITY.md", "/CHANGELOG.md"]
 
 [lib]
 name = "hush"

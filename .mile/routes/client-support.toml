@@ -43,6 +43,13 @@ notes = "Go on macOS reads only the keychain; pinned clients fail with a TLS err
 status = "todo"
 created_at = "2026-09-27T19:10:08.335556Z"
 
+[[stones.steps]]
+id = "hush-run-sets-cargo-http-cainfo-so-cargo-trusts-the-run-s-ca"
+title = "hush run sets CARGO_HTTP_CAINFO so cargo trusts the run's CA"
+notes = "Found 2026-10-27 publishing hush-secrets with the crates.io token in the vault (bound to crates.io, --format '{value}'). cargo ignores SSL_CERT_FILE and CURL_CA_BUNDLE and fails with UnknownCA; CARGO_HTTP_CAINFO=$SSL_CERT_FILE makes it work (it honors HTTPS_PROXY already). Add it to run::child_env next to the other CA variables, with the bundle, and list it in CLAUDE.md's child environment."
+status = "todo"
+created_at = "2026-10-27T03:01:29.145906Z"
+
 [[stones]]
 id = "windows-support"
 title = "Windows support"
