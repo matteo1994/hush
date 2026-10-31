@@ -13,8 +13,9 @@ created_at = "2026-10-19T02:31:04.069761Z"
 id = "survey-how-each-agent-app-reaches-its-model-api"
 title = "Survey how each agent app reaches its model API"
 notes = "For Cursor, VS Code (Claude Code, Copilot, Cline extensions), Windsurf, Zed, the Claude desktop app and JetBrains: which process sends the request (renderer, Node extension host, a spawned CLI), whether it honors HTTP(S)_PROXY, SSL_CERT_FILE, NODE_EXTRA_CA_CERTS, whether it is single-instance (a second launch hands off to the running one, without hush's env), and where the key is configured. Write the table to docs/agent-apps.md. Overlaps client-support's 'clients that ignore the CA env vars'. Found 2026-10-25: Claude desktop's chat and GitHub Copilot sign in with an account, so there is no key to swap (out of scope); Claude desktop's MCP servers work under hush run (see the mcp-servers step); Cursor reportedly sends even a user's own key through its servers, to verify."
-status = "todo"
+status = "done"
 created_at = "2026-10-19T02:31:04.069765Z"
+completed_at = "2026-10-31T15:28:17.329527Z"
 
 [[stones]]
 id = "launching"

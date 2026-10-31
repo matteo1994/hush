@@ -172,6 +172,23 @@ hush passwd    # current passphrase, then the new one twice
 
 `hush secret unbind NAME --host HOST` removes that one binding. The secret and its other bindings stay. When the same host is bound for more than one environment, pass `--env` to say which (`default` for the binding without one). A secret with no bindings left is kept, and `hush run` will not inject it until it is bound again. Changing a binding is unbind, then bind; `secret bind` says so when the environment is already bound.
 
+## VS Code and its extensions
+
+VS Code started by `hush run` passes the placeholders, proxy and CA variables on to its extensions, to the processes they start (such as the `claude` CLI behind the Claude Code extension), and to its integrated terminal. On macOS:
+
+```bash
+mkdir -p ~/.vscode-hush/User
+echo '{ "http.fetchAdditionalSupport": false }' > ~/.vscode-hush/User/settings.json
+hush run --secret ANTHROPIC_API_KEY -- "/Applications/Visual Studio Code.app/Contents/MacOS/Code" --user-data-dir ~/.vscode-hush
+```
+
+- **Start the app binary, not `code`.** `hush run` lasts as long as its command, and `code` returns as soon as the window is open, which ends the run and its proxy. The app binary stays until VS Code quits.
+- **Use a user-data dir of its own.** VS Code runs one instance per user-data dir and hands a second launch to the running one, which keeps its own environment. A separate dir runs beside your usual VS Code, with its own settings and sign-ins; extensions are shared.
+- **`http.fetchAdditionalSupport: false`** makes `fetch` in extensions trust the run's CA. With VS Code's default, an extension's `fetch` to a bound host fails with a certificate error (nothing leaks); Node's `https` works either way.
+- **Name the secrets with `--secret` or `global.env`.** One VS Code serves many projects, so a project's `.env` is a poor fit.
+
+This covers extensions that read their key from the environment, such as Claude Code (`ANTHROPIC_API_KEY`) and Codex (`OPENAI_API_KEY`). A key you pasted into an extension's settings (Cline, Continue, Copilot's own-key models) is the real key, kept in the keychain, and hush never sees it. `hush run` refuses to start in the integrated terminal, which already has the placeholders. `scripts/vscode-check/run.sh` checks your VS Code: it starts it under `hush run` with a throwaway profile and the setting above, sends a key bound to postman-echo each way an extension can, and prints what arrived. Check an extension itself once with a key bound to an echo service, as under *A bound host that echoes the key back*. [docs/agent-apps.md](docs/agent-apps.md) has what was tested and how other agent apps compare.
+
 ## Without a terminal: agent apps on macOS
 
 An app started from the Dock, such as the Claude desktop app, starts its MCP servers with no terminal, so `hush run` there can't ask for the passphrase. On macOS it can open the vault with Touch ID instead, or your login password where there is no sensor:
