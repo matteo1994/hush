@@ -31,6 +31,8 @@ Plan and progress (the `mile` CLI): `.mile/routes/` is tracked, so the plan is s
 
 `tests/run.rs` runs `hush run` end to end: a vault in a temp `HOME`, a child shell using curl through the proxy, and upstream servers on 127.0.0.1 that record what they receive. It covers the swap, Ctrl-C, exit codes and the run-dir sweep. Manual end-to-end testing without interactive prompts: set `HUSH_PASSPHRASE` (used by every command that opens the vault), `HUSH_SECRET_VALUE` (used by `secret add` and `secret set`; `secret set --stdin` reads stdin instead) and `HUSH_NEW_PASSPHRASE` (the new passphrase for `hush passwd`, read for both prompts). They operate on the real vault at `~/.config/hush/`, and there is no config-dir override, so point `HOME` at a throwaway directory such as `target/e2e`. `hush run` strips all three from the child, so a nested `hush secret ...` inside it has to prompt, and fails with "no terminal" when there is none.
 
+`scripts/vscode-check/run.sh [SECRET] [URL]` (macOS, not run in CI) starts VS Code under `hush run` with a temporary profile and a probe extension that sends the placeholder to an echo service through Node `https`, `fetch`, a child process and `curl`, checks that the integrated terminal has the placeholder, then quits and prints one `ok` line per path. `docs/agent-apps.md` records what it and the rest of the agent-app survey found.
+
 ## Architecture
 
 Single binary, no background process. Each command opens the vault itself.
