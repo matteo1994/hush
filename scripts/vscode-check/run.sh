@@ -27,11 +27,28 @@ mkdir -p "$profile/User"
 echo '{ "http.fetchAdditionalSupport": false }' > "$profile/User/settings.json"
 
 # Quits VS Code if it never gets to the results, say because the extension
-# didn't load.
-( sleep 150; pkill -f -- "--user-data-dir $profile" ) > /dev/null 2>&1 &
+# didn't load. Counted from VS Code's start, so the passphrase prompt before
+# it takes as long as it takes. Anchored on the binary, because `hush run`'s
+# own arguments name the profile too.
+vscode_process="^$vscode --new-window --user-data-dir $profile"
+(
+    until pgrep -f -- "$vscode_process" > /dev/null; do sleep 1; done
+    sleep 150
+    pkill -f -- "$vscode_process"
+) > /dev/null 2>&1 &
 watchdog=$!
 disown
-trap 'kill "$watchdog" 2>/dev/null; rm -rf "$profile"' EXIT
+# VS Code's helper processes outlive a killed main process for a moment, and
+# would write the profile back after it's removed.
+cleanup() {
+    kill "$watchdog" 2> /dev/null || true
+    for _ in $(seq 20); do
+        pgrep -f -- "$profile" > /dev/null || break
+        sleep 0.5
+    done
+    rm -rf "$profile"
+}
+trap cleanup EXIT
 
 CHECK_SECRET=$secret CHECK_URL=$url CHECK_OUT=$profile/results \
     "$hush" run --secret "$secret" -- "$vscode" --new-window --user-data-dir "$profile" \
