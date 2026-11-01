@@ -11,7 +11,8 @@
 # Use a throwaway value: hush sends the real value to the echo service.
 # Uses a temporary VS Code profile, so it runs beside your usual VS Code,
 # and the settings the README recommends. VSCODE_BIN and HUSH_BIN override
-# where VS Code and hush are found.
+# where VS Code and hush are found; VSCODE_BIN must be VS Code's binary, not a
+# script that starts it, or the timeout below can't find the process.
 set -euo pipefail
 
 secret=${1:-HUSH_CHECK}
@@ -27,18 +28,47 @@ mkdir -p "$profile/User"
 echo '{ "http.fetchAdditionalSupport": false }' > "$profile/User/settings.json"
 
 # Quits VS Code if it never gets to the results, say because the extension
-# didn't load.
-( sleep 150; pkill -f -- "--user-data-dir $profile" ) > /dev/null 2>&1 &
+# didn't load. Counted from VS Code's start, so the passphrase prompt before
+# it takes as long as it takes. Anchored on the binary, because `hush run`'s
+# own arguments name the profile too.
+vscode_process="^$(printf '%s' "$vscode --new-window --user-data-dir $profile" | sed 's/[][\.*^$+?(){}|]/\\&/g')"
+(
+    until pgrep -f -- "$vscode_process" > /dev/null; do sleep 1; done
+    sleep 150
+    touch "$profile/timed-out"
+    pkill -f -- "$vscode_process"
+) > /dev/null 2>&1 &
 watchdog=$!
 disown
-trap 'kill "$watchdog" 2>/dev/null; rm -rf "$profile"' EXIT
+# VS Code's helper processes outlive a killed main process for a moment, and
+# would write the profile back after it's removed.
+cleanup() {
+    kill "$watchdog" 2> /dev/null || true
+    for _ in $(seq 20); do
+        pgrep -f -- "$profile" > /dev/null || break
+        sleep 0.5
+    done
+    pkill -KILL -f -- "$profile" 2> /dev/null || true
+    rm -rf "$profile"
+}
+trap cleanup EXIT
 
+status=0
 CHECK_SECRET=$secret CHECK_URL=$url CHECK_OUT=$profile/results \
     "$hush" run --secret "$secret" -- "$vscode" --new-window --user-data-dir "$profile" \
     --extensions-dir "$profile/extensions" --extensionDevelopmentPath="$here/extension" \
     --skip-welcome --disable-workspace-trust > "$profile/vscode.log" 2>&1 \
-    || { tail -5 "$profile/vscode.log" >&2; exit 1; }
+    || status=$?
 
+if [ -e "$profile/timed-out" ]; then
+    echo "VS Code didn't report results within 150s; its output was:" >&2
+    tail -20 "$profile/vscode.log" >&2
+    exit 1
+fi
+if [ "$status" != 0 ]; then
+    tail -5 "$profile/vscode.log" >&2
+    exit 1
+fi
 if [ ! -s "$profile/results" ]; then
     echo "VS Code quit without results; its output was:" >&2
     tail -20 "$profile/vscode.log" >&2
