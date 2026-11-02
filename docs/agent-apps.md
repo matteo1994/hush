@@ -51,8 +51,8 @@ Tested on macOS with VS Code 1.125.1 (Node 24.15.0 in the extension host). A pro
 |---|---|
 | `…/Visual Studio Code.app/Contents/MacOS/Code --user-data-dir DIR` | **Works.** The run lasts until VS Code quits |
 | `code --wait --new-window --user-data-dir DIR` | Works. `--wait` returns when that window closes, though, so with more windows open the run would end under them (not tested) |
-| `code` without `--wait` | `code` returns in about 2s, the run and its proxy end, and keyed requests from VS Code then hang. Fails closed |
-| any of these while VS Code already runs with that user-data dir | VS Code is single-instance per user-data dir, so the launch is handed to the running instance. Plain `code --wait` hangs on a handoff with no file to wait for. Not supported |
+| `code` without `--wait` | `code` returns in about 2s, the run and its proxy end, and keyed requests from VS Code then hang. Fails closed; `hush run` now warns when an app returns this fast |
+| any of these while VS Code already runs with that user-data dir | VS Code is single-instance per user-data dir, so the launch is handed to the running instance. Plain `code --wait` hangs on a handoff with no file to wait for. Not supported: `hush run` now refuses to start the binary while an instance with the same user-data dir runs |
 
 A separate `--user-data-dir` gives a VS Code instance of its own, so it can run beside an ordinary VS Code. It has its own settings and sign-ins; extensions still come from `~/.vscode/extensions` unless `--extensions-dir` says otherwise. The README's *VS Code* section has the recipe.
 

@@ -324,6 +324,73 @@ fn exit_codes_pass_through() {
     );
 }
 
+/// An Electron app that is already running takes a second launch over,
+/// which keeps none of the run's placeholders, so hush refuses to start one;
+/// a launch with a `--user-data-dir` of its own is a separate instance and
+/// starts. An app that returns at once, as a handed-over launch does, gets a
+/// warning. A run with no secrets has nothing to lose and is left alone. The
+/// app is a copy of hush in a bundle: macOS kills a copied system binary.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_running_app_is_not_launched_into() {
+    let home = Home::with_key("app", 1);
+    let contents = home.0.join("Fake.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::create_dir_all(contents.join("Frameworks/Electron Framework.framework")).unwrap();
+    let exe = contents.join("MacOS/Fake");
+    std::fs::copy(env!("CARGO_BIN_EXE_hush"), &exe).unwrap();
+    let exe = exe.to_str().unwrap();
+    let launch = |args: &[&str]| {
+        let mut all = vec!["run", "--secret", "DEMO_KEY", "--", exe];
+        all.extend(args);
+        home.hush(&all).output().unwrap()
+    };
+
+    let quick = launch(&["--version"]);
+    let stderr = String::from_utf8_lossy(&quick.stderr);
+    assert!(quick.status.success(), "{quick:?}");
+    assert!(stderr.contains("Fake returned after 0s"), "{stderr}");
+
+    let mut running = Command::new(exe)
+        .args(["run", "--", "sleep", "30"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("HOME", &home.0)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let refused = launch(&["--version"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        stderr.contains(&format!(
+            "Fake is already running without --user-data-dir (pid {})",
+            running.id()
+        )),
+        "expected pid {}: {stderr}",
+        running.id()
+    );
+
+    let no_secrets = home.ok(home.hush(&["run", "--", exe, "--version"]));
+    assert_eq!(String::from_utf8_lossy(&no_secrets.stderr), "");
+
+    // Started: the copy itself then refuses to nest, which is its own error.
+    let data = home.0.join("data");
+    let separate = launch(&[
+        "run",
+        "--",
+        "true",
+        "--user-data-dir",
+        data.to_str().unwrap(),
+    ]);
+    let stderr = String::from_utf8_lossy(&separate.stderr);
+    assert!(stderr.contains("already inside"), "{stderr}");
+    assert!(!stderr.contains("already running"), "{stderr}");
+
+    unsafe { libc::kill(-(running.id() as libc::pid_t), libc::SIGKILL) };
+    running.wait().unwrap();
+}
+
 /// Ctrl-C reaches the whole foreground process group. The child decides what
 /// it means; hush has to survive it and keep the proxy serving.
 #[test]

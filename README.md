@@ -182,8 +182,8 @@ mkdir -p ~/.vscode-hush/User
 hush run --secret ANTHROPIC_API_KEY -- "/Applications/Visual Studio Code.app/Contents/MacOS/Code" --user-data-dir ~/.vscode-hush
 ```
 
-- **Start the app binary, not `code`.** `hush run` lasts as long as its command, and `code` returns as soon as the window is open, which ends the run and its proxy. The app binary stays until VS Code quits.
-- **Use a user-data dir of its own.** VS Code runs one instance per user-data dir and hands a second launch to the running one, which keeps its own environment. A separate dir runs beside your usual VS Code, with its own settings and sign-ins; extensions are shared.
+- **Start the app binary, not `code`.** `hush run` lasts as long as its command, and `code` returns as soon as the window is open, which ends the run and its proxy. The app binary stays until VS Code quits. hush warns when an Electron app's binary, or a launcher inside its bundle like `code`, returns within seconds.
+- **Use a user-data dir of its own.** VS Code runs one instance per user-data dir and hands a second launch to the running one, which keeps its own environment. A separate dir runs beside your usual VS Code, with its own settings and sign-ins; extensions are shared. On macOS `hush run` refuses to start an Electron app that is already running with the same `--user-data-dir`, or both without one.
 - **`http.fetchAdditionalSupport: false`** makes `fetch` in extensions trust the run's CA. With VS Code's default, an extension's `fetch` to a bound host fails with a certificate error (nothing leaks); Node's `https` works either way.
 - **Name the secrets with `--secret` or `global.env`.** One VS Code serves many projects, so a project's `.env` is a poor fit.
 

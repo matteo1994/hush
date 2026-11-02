@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 
-use crate::harden;
 use crate::proxy::{ErrorLog, PlaceholderEntry, start_proxy};
 use crate::tls::{self, Mitm, TrustFiles};
 use crate::vault::{self, Vault};
+use crate::{app, harden};
 
 /// Set in the child's environment so a nested `hush run` can tell it's inside one.
 pub const ACTIVE_VAR: &str = "HUSH_ACTIVE";
@@ -145,8 +145,12 @@ pub fn run(
         );
     }
     if names.is_empty() {
-        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None));
+        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None))
+            .map(|(code, _)| code);
     }
+    // Before the passphrase: an app that hands the launch over gains nothing
+    // from the run.
+    app::refuse_if_running(&cmd)?;
 
     let minted = {
         let vault = open_vault()?;
@@ -174,7 +178,8 @@ pub fn run(
         eprintln!("hush: warning: {warning}");
     }
     if minted.table.is_empty() {
-        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None));
+        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None))
+            .map(|(code, _)| code);
     }
 
     let (upstream_roots, system_roots) = tls::native_roots()?;
@@ -184,15 +189,18 @@ pub fn run(
     let errors = Arc::new(ErrorLog::default());
     let port = start_proxy(Arc::new(Mutex::new(minted.table)), mitm, errors.clone())?;
 
-    let code = spawn(
+    let result = spawn(
         &cmd,
         child_env(std::env::vars(), &minted.placeholders, Some((port, &trust))),
     );
     // Only now: while the child ran, the terminal was its to draw on.
+    if let Ok((_, Some(elapsed))) = &result {
+        app::warn_if_handed_off(&cmd[0], *elapsed);
+    }
     if let Some(summary) = errors.summary() {
         eprintln!("hush: {summary}");
     }
-    code
+    result.map(|(code, _)| code)
 }
 
 /// The profile `hush profile use` mapped to `cwd` or the nearest directory
@@ -224,13 +232,18 @@ fn mapped_profile(vault: &Vault, cwd: &Path) -> Option<String> {
     None
 }
 
-fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
+/// The child's exit code, and how long it ran when it succeeded.
+fn spawn(
+    cmd: &[String],
+    env: HashMap<String, String>,
+) -> Result<(ExitCode, Option<std::time::Duration>)> {
     let (program, args) = cmd
         .split_first()
         .expect("clap requires at least one cmd arg");
     let mut cmd = Command::new(program);
     cmd.args(args).env_clear().envs(&env);
     harden::restore_for_child(&mut cmd);
+    let started = std::time::Instant::now();
     let mut child = cmd.spawn().with_context(|| format!("starting {program}"))?;
 
     // Ctrl-C / Ctrl-\ go to the whole foreground process group. The child
@@ -243,12 +256,13 @@ fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
     }
 
     let status = child.wait()?;
+    let succeeded_after = status.success().then(|| started.elapsed());
     let code = match (status.code(), status.signal()) {
         (Some(code), _) => code,
         (None, Some(sig)) => 128 + sig,
         (None, None) => 1,
     };
-    Ok(ExitCode::from(code as u8))
+    Ok((ExitCode::from(code as u8), succeeded_after))
 }
 
 /// A private directory for one run's CA files, removed when the run ends.
