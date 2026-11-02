@@ -8,10 +8,10 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
 
-use crate::harden;
 use crate::proxy::{ErrorLog, PlaceholderEntry, start_proxy};
 use crate::tls::{self, Mitm, TrustFiles};
 use crate::vault::{self, Vault};
+use crate::{app, harden};
 
 /// Set in the child's environment so a nested `hush run` can tell it's inside one.
 pub const ACTIVE_VAR: &str = "HUSH_ACTIVE";
@@ -144,6 +144,9 @@ pub fn run(
              start a separate `hush run` from your own shell instead"
         );
     }
+    // Before the passphrase: an app that hands the launch over gains nothing
+    // from the run.
+    app::refuse_if_running(&cmd)?;
     if names.is_empty() {
         return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None));
     }
@@ -231,6 +234,7 @@ fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
     let mut cmd = Command::new(program);
     cmd.args(args).env_clear().envs(&env);
     harden::restore_for_child(&mut cmd);
+    let started = std::time::Instant::now();
     let mut child = cmd.spawn().with_context(|| format!("starting {program}"))?;
 
     // Ctrl-C / Ctrl-\ go to the whole foreground process group. The child
@@ -243,6 +247,9 @@ fn spawn(cmd: &[String], env: HashMap<String, String>) -> Result<ExitCode> {
     }
 
     let status = child.wait()?;
+    if status.success() {
+        app::warn_if_handed_off(program, started.elapsed());
+    }
     let code = match (status.code(), status.signal()) {
         (Some(code), _) => code,
         (None, Some(sig)) => 128 + sig,

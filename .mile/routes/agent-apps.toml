@@ -26,8 +26,9 @@ created_at = "2026-10-19T02:31:04.080489Z"
 id = "launch-a-gui-app-under-hush-run-refusing-when-it-is-already-running"
 title = "Launch a GUI app under hush run, refusing when it is already running"
 notes = "e.g. hush run -- /Applications/Cursor.app/Contents/MacOS/Cursor. 'open -a' doesn't work: LaunchServices starts the app with launchd's environment, not hush's. A single-instance app that's already running receives the launch and keeps its old environment, so detect that and refuse with a clear message."
-status = "todo"
+status = "done"
 created_at = "2026-10-19T02:31:04.080493Z"
+completed_at = "2026-11-01T23:55:40.663967Z"
 
 [[stones.steps]]
 id = "prompt-for-the-passphrase-without-a-terminal"
