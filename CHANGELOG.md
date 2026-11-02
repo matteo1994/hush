@@ -4,6 +4,12 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.30 (2026-11-02)
+
+- Document running VS Code under hush, with a script that checks it. (#54)
+- Start the VS Code check's timeout once VS Code is running. (#55)
+- Refuse to start an app under hush run while it is already running. (#56)
+
 ## 0.1.29 (2026-10-31)
 
 - Show a short page on crates.io that links to the full README on GitHub. (#53)
