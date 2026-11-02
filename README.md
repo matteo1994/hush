@@ -142,6 +142,8 @@ hush run --profile acme -- ./deploy.sh      # one run with acme, wherever it sta
 hush run -- claude                          # a coding agent and everything it starts
 ```
 
+`hush run` exits with the command's exit code, or `128+signal` if a signal killed it. When hush itself fails, such as being unable to start the command, it exits 125, as `env` and `docker run` do.
+
 ## Rotating a key
 
 `hush secret add NAME --force` replaces the value and drops every binding, so each host has to be bound again. `hush secret set` replaces only the value:
