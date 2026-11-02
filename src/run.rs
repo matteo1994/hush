@@ -16,6 +16,10 @@ use crate::{app, harden};
 /// Set in the child's environment so a nested `hush run` can tell it's inside one.
 pub const ACTIVE_VAR: &str = "HUSH_ACTIVE";
 
+/// `hush run`'s exit code when hush itself failed rather than the child, as
+/// for `env` and `docker run`. A launcher relies on telling the two apart.
+pub const OWN_FAILURE: u8 = 125;
+
 /// hush's own inputs. They must never reach the child: a passphrase would
 /// let it decrypt the vault directly.
 const SCRUBBED_VARS: &[&str] = &[

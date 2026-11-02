@@ -16,7 +16,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::app;
+use crate::{app, run};
 
 /// Marks a bundle as one of ours, so `--force` never replaces anything else.
 const ID_PREFIX: &str = "hush.launcher.";
@@ -71,6 +71,19 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     // Built beside the destination, so a failure leaves any old one in place.
     let tmp = folder.join(format!(".{name} (hush).app.tmp"));
     let _ = fs::remove_dir_all(&tmp);
+    let written = write_bundle(&tmp, &name, &bundle, &binary, run).and_then(|()| {
+        replace_bundle(&tmp, &dest, &folder.join(format!(".{name} (hush).app.old")))
+    });
+    if written.is_err() {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    written.with_context(|| format!("writing {}", dest.display()))?;
+    Ok(dest)
+}
+
+/// The launcher's files, in `tmp`.
+fn write_bundle(tmp: &Path, name: &str, bundle: &Path, binary: &Path, run: &RunArgs) -> Result<()> {
+    let plist = bundle.join("Contents/Info.plist");
     let icon = plist_value(&plist, "CFBundleIconFile").and_then(|icon| {
         let file = if Path::new(&icon).extension().is_some() {
             icon
@@ -86,11 +99,11 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     fs::create_dir_all(tmp.join("Contents/MacOS"))?;
     fs::write(
         tmp.join("Contents/Info.plist"),
-        info_plist(&name, icon.as_deref()),
+        info_plist(name, icon.as_deref()),
     )?;
     let script_path = tmp.join("Contents/MacOS").join(EXECUTABLE);
     let hush = std::env::current_exe()?;
-    fs::write(&script_path, script(&name, &hush, &binary, run))?;
+    fs::write(&script_path, script(name, &hush, binary, run))?;
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
     if let Some(icon) = &icon {
         fs::create_dir_all(tmp.join("Contents/Resources"))?;
@@ -99,11 +112,7 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
             tmp.join("Contents/Resources").join(icon),
         )?;
     }
-    if dest.exists() {
-        fs::remove_dir_all(&dest)?;
-    }
-    fs::rename(&tmp, &dest).with_context(|| format!("writing {}", dest.display()))?;
-    Ok(dest)
+    Ok(())
 }
 
 /// A path as given, or `NAME.app` in the folders apps are installed to.
@@ -146,6 +155,28 @@ fn plist_value(plist: &Path, key: &str) -> Option<String> {
     Some(value.trim_end_matches('\n').to_string())
 }
 
+/// Moves `tmp` to `dest`, putting back whatever was at `dest` if that fails.
+fn replace_bundle(tmp: &Path, dest: &Path, old: &Path) -> Result<()> {
+    let _ = fs::remove_dir_all(old);
+    if dest.exists() {
+        fs::rename(dest, old)?;
+    }
+    if let Err(e) = fs::rename(tmp, dest) {
+        let _ = fs::rename(old, dest);
+        return Err(e.into());
+    }
+    let _ = fs::remove_dir_all(old);
+    Ok(())
+}
+
+/// A short hash of `name` that is the same in every build, unlike
+/// `DefaultHasher`: FNV-1a.
+fn stable_hash(name: &str) -> u32 {
+    name.bytes().fold(0x811c_9dc5, |hash: u32, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    })
+}
+
 /// `LSUIElement` keeps the launcher out of the Dock: it never checks in as an
 /// app, so its icon would bounce beside the real app's.
 fn info_plist(name: &str, icon: Option<&str>) -> String {
@@ -153,6 +184,9 @@ fn info_plist(name: &str, icon: Option<&str>) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    // Names can share a slug, and LaunchServices treats bundles with one id
+    // as one app.
+    let hash = stable_hash(name);
     let title = xml_escape(&format!("{name} (hush)"));
     let icon = icon.map_or(String::new(), |icon| {
         format!(
@@ -166,7 +200,7 @@ fn info_plist(name: &str, icon: Option<&str>) -> String {
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key><string>{EXECUTABLE}</string>
-  <key>CFBundleIdentifier</key><string>{ID_PREFIX}{slug}</string>
+  <key>CFBundleIdentifier</key><string>{ID_PREFIX}{slug}-{hash:08x}</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>{title}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -203,6 +237,7 @@ fn script(name: &str, hush: &Path, binary: &Path, run: &RunArgs) -> String {
     let title = quote(&format!("{name} under hush"));
     let hush = quote(&hush.to_string_lossy());
     let log = quote(&format!("{name}.log"));
+    let own_failure = run::OWN_FAILURE;
     format!(
         r#"#!/bin/sh
 # Written by `hush app add`. It holds no secret: `hush run` opens the vault.
@@ -225,7 +260,7 @@ mkdir -p "$logs"
 (umask 077; : >"$log")
 {command} >"$log" 2>&1
 code=$?
-if [ "$code" -ne 0 ]; then
+if [ "$code" -eq {own_failure} ]; then
   why=$(grep '^hush: ' "$log" | tail -n 3)
   [ -z "$why" ] || alert "$why"
 fi
@@ -274,12 +309,18 @@ mod tests {
             text.contains("<string>R&amp;D &lt;x&gt; (hush)</string>"),
             "{text}"
         );
-        assert!(
-            text.contains("<string>hush.launcher.R-D--x-</string>"),
-            "{text}"
-        );
+        assert!(text.contains("<string>hush.launcher.R-D--x--"), "{text}");
         assert!(text.contains("<key>LSUIElement</key><true/>"), "{text}");
         assert!(text.contains("<string>a.icns</string>"), "{text}");
+    }
+
+    #[test]
+    fn names_with_one_slug_get_different_ids() {
+        let id = |name| info_plist(name, None);
+        assert_ne!(id("R&D"), id("R D"));
+        assert_eq!(stable_hash("Cursor"), stable_hash("Cursor"));
+        // Pinned: a launcher's id must not change between builds.
+        assert_eq!(stable_hash("a"), 0xe40c_292c);
     }
 
     #[test]

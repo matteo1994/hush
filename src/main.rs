@@ -325,6 +325,11 @@ enum ProfileAction {
 fn main() -> ExitCode {
     harden::process();
     let cli = Cli::parse();
+    // A run's exit code is otherwise the child's.
+    let failure = match cli.command {
+        Command::Run { .. } => ExitCode::from(run::OWN_FAILURE),
+        _ => ExitCode::FAILURE,
+    };
     match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
@@ -332,7 +337,7 @@ fn main() -> ExitCode {
             // serde error quotes the vault value it rejected, and inside
             // `hush run` an agent can read this terminal.
             eprintln!("hush: {e}");
-            ExitCode::FAILURE
+            failure
         }
     }
 }

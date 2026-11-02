@@ -231,7 +231,7 @@ That writes `~/Applications/Visual Studio Code (hush).app`, with the app's icon,
 - **Open it from the launcher every time.** The Dock icon of the running app is the app's own: pinned and clicked later, it starts the app without hush. Pin the launcher instead.
 - **Opening the launcher again does nothing while the app runs.** The launcher stays out of the Dock and doesn't bring the app forward, so switch to the app as usual.
 - **Files aren't passed on.** "Open With" the launcher starts the app without the file.
-- **When a run fails, an alert shows why**, such as the app already running without its own user-data dir. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
+- **When hush fails, an alert shows why**, such as the app already running without its own user-data dir. An app that exits with an error on its own shows none. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
 
 ## Current scope (v0)
 

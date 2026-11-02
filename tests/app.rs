@@ -209,6 +209,28 @@ fn an_app_failing_on_its_own_shows_no_alert_and_keeps_its_exit_code() {
     assert!(home.log("Fake").contains("app noise"));
 }
 
+/// hush's warnings in the log don't make the app's own failure hush's.
+#[test]
+fn an_app_failing_after_a_warning_shows_no_alert() {
+    let home = Home::new("warned");
+    assert_ok(home.hush(&["init"]).output().unwrap());
+    let mut add = home.hush(&["secret", "add", "DEMO_KEY", "--host", "api.example.com"]);
+    add.args(["--max-age", "1s"]).env("HUSH_SECRET_VALUE", REAL);
+    assert_ok(add.output().unwrap());
+    let app = home.fake_app("Fake", "#!/bin/sh\nexit 3\n");
+    assert_ok(
+        home.hush(&["app", "add", app.to_str().unwrap(), "--secret", "DEMO_KEY"])
+            .output()
+            .unwrap(),
+    );
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let out = home.launch("Fake");
+    assert_eq!(out.status.code(), Some(3), "{out:?}");
+    assert!(home.log("Fake").contains("overdue"), "{}", home.log("Fake"));
+    assert_eq!(home.alerts(), "");
+}
+
 #[test]
 fn a_moved_hush_is_reported() {
     let home = Home::with_key("moved");
