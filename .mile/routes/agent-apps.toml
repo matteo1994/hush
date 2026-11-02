@@ -42,8 +42,9 @@ completed_at = "2026-10-27T02:18:46.824159Z"
 id = "make-a-launcher-that-starts-an-app-through-hush"
 title = "Make a launcher that starts an app through hush"
 notes = "macOS only: e.g. 'hush app add Cursor' writes a small .app bundle to ~/Applications that runs hush run on the app's binary, so it opens from the Dock or Spotlight. 'open -a' doesn't work: LaunchServices starts the app with launchd's environment. It must not write the passphrase anywhere."
-status = "todo"
+status = "done"
 created_at = "2026-10-19T02:31:04.103954Z"
+completed_at = "2026-11-02T01:07:52.330160Z"
 
 [[stones.steps]]
 id = "start-a-separate-app-instance-with-its-own-profile-directory-under-hush-run"

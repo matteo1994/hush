@@ -217,6 +217,22 @@ An MCP server then runs under hush from the app's config, with the key in the va
 
 The server gets a placeholder, and its requests to the host the secret is bound to get the real value. This works for a server that reads its key from an environment variable and makes its requests with an HTTP client that honors `HTTPS_PROXY` and hush's CA variables (listed under *HTTPS*). Name that variable with `--secret`, store the key with `hush secret add EXAMPLE_API_KEY --host api.example.com`, and match the binding's `--header` and `--format` to what the server sends, since hush swaps only that header. Tested with a Python server using `urllib`; check a new server once with a key bound to an echo service, as under *A bound host that echoes the key back*. The Claude desktop app starts each configured server twice, so expect two Touch ID prompts when it launches.
 
+### Opening an app from the Dock or Spotlight
+
+The Dock and Spotlight start an app with launchd's environment, so nothing of a `hush run` reaches it, and `hush run -- open -a …` ends as soon as `open` returns, taking the proxy along. `hush app add` writes a small launcher app that stays for as long as the app does:
+
+```bash
+hush keychain enable     # a launcher has no terminal to ask for the passphrase on
+hush app add "Visual Studio Code" --secret ANTHROPIC_API_KEY -- --user-data-dir ~/.vscode-hush
+```
+
+That writes `~/Applications/Visual Studio Code (hush).app`, with the app's icon, which Spotlight finds and the Dock can keep. It's a shell script and a plist: it holds the command you would have typed, and no secret. `APP` is a name in `/Applications` or `~/Applications`, or the path of a bundle. Everything after `--` goes to the app, so see *VS Code and its extensions* for the user-data dir and its setting; give an absolute path. `--profile` and `--env` work as in `hush run`. A project's `.env` doesn't apply, as a launcher runs from `/`, so name secrets with `--secret` or `~/.config/hush/global.env`. `--force` replaces the launcher, which you need after moving hush, since it records hush's path. Delete the `.app` to remove it.
+
+- **Open it from the launcher every time.** The Dock icon of the running app is the app's own: pinned and clicked later, it starts the app without hush. Pin the launcher instead.
+- **Opening the launcher again does nothing while the app runs.** The launcher stays out of the Dock and doesn't bring the app forward, so switch to the app as usual.
+- **Files aren't passed on.** "Open With" the launcher starts the app without the file.
+- **When a run fails, an alert shows why**, such as the app already running without its own user-data dir. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
+
 ## Current scope (v0)
 
 - **HTTP/1.1 to bound hosts.** Intercepted connections negotiate HTTP/1.1 only, not HTTP/2. A client that keeps its connection open gets one upstream connection for as long as it does, so repeated requests skip the TLS handshake; plain HTTP is still one request per connection. WebSocket upgrades to a bound host aren't supported.
