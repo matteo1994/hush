@@ -1,12 +1,14 @@
 //! Apps started from inside their bundle, such as
 //! `hush run -- "/Applications/Visual Studio Code.app/Contents/MacOS/Code"`.
 //!
-//! Such an app usually runs once per profile: a second launch hands itself to
-//! the instance already running and exits. That instance was started without
+//! An Electron app (VS Code, Cursor, Windsurf, Claude) runs once per
+//! `--user-data-dir`: a second launch with the same one hands itself to the
+//! instance already running and exits. That instance was started without
 //! this run's placeholders and proxy, so the launch would quietly use none of
-//! them, and `hush run` would end with the launch, taking its proxy along.
-//! Electron apps (VS Code, Cursor, Windsurf, Claude) keep one instance per
-//! `--user-data-dir`, so a different one gets an instance of its own.
+//! them, and `hush run` would end with the launch, taking its proxy along. A
+//! different `--user-data-dir` gets an instance of its own. Other apps are
+//! left alone: some, like Ghostty, ship their CLI as the app's binary, which
+//! runs any number of times.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -33,12 +35,22 @@ fn resolve(program: &str) -> Option<PathBuf> {
     path.canonicalize().ok()
 }
 
-/// The app `exe` is the binary of: one in its bundle's `Contents/MacOS`. A
-/// tool that ships inside a bundle, such as Docker's `docker` in
-/// `Contents/Resources/bin`, is not the app, and may run any number of times.
+/// The Electron app `exe` is the binary of: one in its bundle's
+/// `Contents/MacOS`. A tool that ships inside a bundle, such as Docker's
+/// `docker` in `Contents/Resources/bin`, is not the app, and may run any
+/// number of times.
 fn app_of(exe: &Path) -> Option<PathBuf> {
-    let bundle = bundle_of(exe)?;
+    let bundle = electron_bundle_of(exe)?;
     (exe.parent()? == bundle.join("Contents/MacOS")).then_some(bundle)
+}
+
+/// The bundle `path` is in, when that is an Electron app.
+fn electron_bundle_of(path: &Path) -> Option<PathBuf> {
+    let bundle = bundle_of(path)?;
+    bundle
+        .join("Contents/Frameworks/Electron Framework.framework")
+        .is_dir()
+        .then_some(bundle)
 }
 
 /// The app a launcher script in its bundle starts, such as VS Code's `code`
@@ -50,7 +62,7 @@ fn launched_by(exe: &Path) -> Option<PathBuf> {
     if &start != b"#!" {
         return None;
     }
-    bundle_of(exe)
+    electron_bundle_of(exe)
 }
 
 /// The outermost bundle `path` is in, since helpers live in bundles of their
@@ -89,19 +101,21 @@ fn user_data_dir(args: &[String]) -> Option<&str> {
     None
 }
 
-/// The same directory, however it was spelled: the other process's relative
-/// path can't be resolved, so that one compares as written.
+/// The same directory, however it was spelled. The other process's relative
+/// path is relative to its own working directory, not ours, so that one
+/// compares as written.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn same_dir(a: Option<&str>, b: Option<&str>) -> bool {
+fn same_dir(ours: Option<&str>, theirs: Option<&str>) -> bool {
     let resolve = |d: &str| Path::new(d).canonicalize().unwrap_or_else(|_| d.into());
-    match (a, b) {
+    match (ours, theirs) {
         (None, None) => true,
-        (Some(a), Some(b)) => resolve(a) == resolve(b),
+        (Some(a), Some(b)) if Path::new(b).is_absolute() => resolve(a) == resolve(b),
+        (Some(a), Some(b)) => a == b,
         _ => false,
     }
 }
 
-/// Refuses to start `cmd` when it is an app's binary and that app already
+/// Refuses to start `cmd` when it is an Electron app's binary and that app already
 /// runs with the same `--user-data-dir` (or both without one), since the
 /// launch would be handed to it.
 #[cfg(target_os = "macos")]
@@ -298,6 +312,9 @@ mod tests {
         let tmp = std::env::temp_dir();
         let dotted = tmp.join(".");
         assert!(same_dir(tmp.to_str(), dotted.to_str()));
+        // Theirs is relative to a working directory we don't know.
+        assert!(same_dir(Some("data"), Some("data")));
+        assert!(!same_dir(tmp.to_str(), Some("tmp")));
         assert!(!same_dir(Some("/a"), Some("/b")));
     }
 
@@ -318,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_apps_own_binary_or_launcher_script_counts() {
+    fn only_an_electron_apps_binary_or_launcher_script_counts() {
         let dir = std::env::temp_dir().join(format!("hush-app-{}", std::process::id()));
         let file = |rel: &str, body: &str| {
             let path = dir.join(rel);
@@ -326,7 +343,13 @@ mod tests {
             std::fs::write(&path, body).unwrap();
             resolve(path.to_str().unwrap()).unwrap()
         };
+        std::fs::create_dir_all(
+            dir.join("Outer.app/Contents/Frameworks/Electron Framework.framework"),
+        )
+        .unwrap();
         let outer = file("Outer.app/Contents/MacOS/Outer", "\x7fELF");
+        let native = file("Native.app/Contents/MacOS/native", "\x7fELF");
+        let native_launcher = file("Native.app/Contents/Resources/bin/native", "#!/bin/sh\n");
         let helper = file(
             "Outer.app/Contents/Frameworks/Helper.app/Contents/MacOS/Helper",
             "",
@@ -344,6 +367,9 @@ mod tests {
         assert_eq!(app_of(&tool), None);
         assert_eq!(launched_by(&tool), None);
         assert_eq!(launched_by(&plain), None);
+        // Not Electron: may well run any number of times.
+        assert_eq!(app_of(&native), None);
+        assert_eq!(launched_by(&native_launcher), None);
         assert_eq!(resolve(dir.join("missing").to_str().unwrap()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }

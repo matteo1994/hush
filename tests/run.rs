@@ -324,23 +324,31 @@ fn exit_codes_pass_through() {
     );
 }
 
-/// An app that is already running takes a second launch over, which keeps
-/// none of the run's placeholders, so hush refuses to start one; a launch
-/// with a `--user-data-dir` of its own is a separate instance and starts. An
-/// app that returns at once, as a handed-over launch does, gets a warning.
-/// The app is a copy of hush in a bundle: macOS kills a copied system binary.
+/// An Electron app that is already running takes a second launch over,
+/// which keeps none of the run's placeholders, so hush refuses to start one;
+/// a launch with a `--user-data-dir` of its own is a separate instance and
+/// starts. An app that returns at once, as a handed-over launch does, gets a
+/// warning. A run with no secrets has nothing to lose and is left alone. The
+/// app is a copy of hush in a bundle: macOS kills a copied system binary.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_running_app_is_not_launched_into() {
-    let home = Home::new("app");
-    let macos = home.0.join("Fake.app/Contents/MacOS");
-    std::fs::create_dir_all(&macos).unwrap();
-    let exe = macos.join("Fake");
+    let home = Home::with_key("app", 1);
+    let contents = home.0.join("Fake.app/Contents");
+    std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+    std::fs::create_dir_all(contents.join("Frameworks/Electron Framework.framework")).unwrap();
+    let exe = contents.join("MacOS/Fake");
     std::fs::copy(env!("CARGO_BIN_EXE_hush"), &exe).unwrap();
     let exe = exe.to_str().unwrap();
+    let launch = |args: &[&str]| {
+        let mut all = vec!["run", "--secret", "DEMO_KEY", "--", exe];
+        all.extend(args);
+        home.hush(&all).output().unwrap()
+    };
 
-    let quick = home.ok(home.hush(&["run", "--", exe, "--version"]));
+    let quick = launch(&["--version"]);
     let stderr = String::from_utf8_lossy(&quick.stderr);
+    assert!(quick.status.success(), "{quick:?}");
     assert!(stderr.contains("Fake returned after 0s"), "{stderr}");
 
     let mut running = Command::new(exe)
@@ -351,10 +359,7 @@ fn a_running_app_is_not_launched_into() {
         .process_group(0)
         .spawn()
         .unwrap();
-    let refused = home
-        .hush(&["run", "--", exe, "--version"])
-        .output()
-        .unwrap();
+    let refused = launch(&["--version"]);
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(!refused.status.success(), "{refused:?}");
     assert!(
@@ -366,21 +371,18 @@ fn a_running_app_is_not_launched_into() {
         running.id()
     );
 
+    let no_secrets = home.ok(home.hush(&["run", "--", exe, "--version"]));
+    assert_eq!(String::from_utf8_lossy(&no_secrets.stderr), "");
+
     // Started: the copy itself then refuses to nest, which is its own error.
     let data = home.0.join("data");
-    let separate = home
-        .hush(&[
-            "run",
-            "--",
-            exe,
-            "run",
-            "--",
-            "true",
-            "--user-data-dir",
-            data.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
+    let separate = launch(&[
+        "run",
+        "--",
+        "true",
+        "--user-data-dir",
+        data.to_str().unwrap(),
+    ]);
     let stderr = String::from_utf8_lossy(&separate.stderr);
     assert!(stderr.contains("already inside"), "{stderr}");
     assert!(!stderr.contains("already running"), "{stderr}");
