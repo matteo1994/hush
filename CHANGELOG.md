@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.31 (2026-11-04)
+
+- Open an app under hush from the Dock or Spotlight with `hush app add`. (#57)
+
 ## 0.1.30 (2026-11-02)
 
 - Document running VS Code under hush, with a script that checks it. (#54)
