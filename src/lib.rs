@@ -5,6 +5,8 @@ mod app;
 pub mod harden;
 #[cfg(target_os = "macos")]
 pub mod keychain;
+#[cfg(target_os = "macos")]
+pub mod launcher;
 pub mod names;
 mod proxy;
 pub mod run;

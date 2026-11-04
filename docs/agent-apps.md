@@ -63,7 +63,7 @@ Two side effects:
 
 ## What this means for the route
 
-- **VS Code with env-reading extensions works today** (Claude Code, likely Codex, anything an extension spawns), from a terminal, with a dedicated user-data dir and one setting. Launching it from the Dock is the *launcher* step.
+- **VS Code with env-reading extensions works today** (Claude Code, likely Codex, anything an extension spawns), from a terminal, with a dedicated user-data dir and one setting. To open it from the Dock, `hush app add` writes a launcher (README, *Opening an app from the Dock or Spotlight*).
 - **Extensions that keep the key in secret storage** (Cline, Roo, Continue, Copilot BYOK) are the larger group. They need the *stable placeholders* step: a placeholder pasted into the extension's key field once, that stays valid across runs.
 - **Zed** is the most promising non-VS Code app: it reads the key from env and the proxy from `HTTPS_PROXY`. The open question is its CA trust.
 - **Cursor** can't be helped: its own-key requests go through Cursor's servers.

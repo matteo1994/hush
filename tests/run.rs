@@ -303,6 +303,19 @@ fn a_mapped_project_runs_with_its_profile() {
     );
 }
 
+/// A failure of hush's own has a code of its own, so it can't be taken for
+/// the child's.
+#[test]
+fn hushs_own_failure_exits_125() {
+    let (port, _rx) = upstream();
+    let home = Home::with_key("own-failure", port);
+    let out = home
+        .hush(&["run", "--secret", "DEMO_KEY", "--", "/nonexistent/program"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(125), "{out:?}");
+}
+
 #[test]
 fn exit_codes_pass_through() {
     let home = Home::new("exit");
@@ -317,7 +330,7 @@ fn exit_codes_pass_through() {
         .hush(&["run", "--", "sh", "-c", r#""$HUSH" run -- true"#])
         .output()
         .unwrap();
-    assert_eq!(nested.status.code(), Some(1));
+    assert_eq!(nested.status.code(), Some(125));
     assert!(
         String::from_utf8_lossy(&nested.stderr).contains("already inside"),
         "{nested:?}"

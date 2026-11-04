@@ -142,6 +142,8 @@ hush run --profile acme -- ./deploy.sh      # one run with acme, wherever it sta
 hush run -- claude                          # a coding agent and everything it starts
 ```
 
+`hush run` exits with the command's exit code, or `128+signal` if a signal killed it. When hush itself fails, such as being unable to start the command, it exits 125, as `env` and `docker run` do.
+
 ## Rotating a key
 
 `hush secret add NAME --force` replaces the value and drops every binding, so each host has to be bound again. `hush secret set` replaces only the value:
@@ -216,6 +218,22 @@ An MCP server then runs under hush from the app's config, with the key in the va
 ```
 
 The server gets a placeholder, and its requests to the host the secret is bound to get the real value. This works for a server that reads its key from an environment variable and makes its requests with an HTTP client that honors `HTTPS_PROXY` and hush's CA variables (listed under *HTTPS*). Name that variable with `--secret`, store the key with `hush secret add EXAMPLE_API_KEY --host api.example.com`, and match the binding's `--header` and `--format` to what the server sends, since hush swaps only that header. Tested with a Python server using `urllib`; check a new server once with a key bound to an echo service, as under *A bound host that echoes the key back*. The Claude desktop app starts each configured server twice, so expect two Touch ID prompts when it launches.
+
+### Opening an app from the Dock or Spotlight
+
+The Dock and Spotlight start an app with launchd's environment, so nothing of a `hush run` reaches it, and `hush run -- open -a …` ends as soon as `open` returns, taking the proxy along. `hush app add` writes a small launcher app that stays for as long as the app does:
+
+```bash
+hush keychain enable     # a launcher has no terminal to ask for the passphrase on
+hush app add "Visual Studio Code" --secret ANTHROPIC_API_KEY -- --user-data-dir ~/.vscode-hush
+```
+
+That writes `~/Applications/Visual Studio Code (hush).app`, with the app's icon, which Spotlight finds and the Dock can keep. It's a shell script and a plist: it holds the command you would have typed, and no secret. `APP` is a name in `/Applications` or `~/Applications`, or the path of a bundle. Everything after `--` goes to the app, so see *VS Code and its extensions* for the user-data dir and its setting; give an absolute path. `--profile` and `--env` work as in `hush run`. A project's `.env` doesn't apply, as a launcher runs from `/`, so name secrets with `--secret` or `~/.config/hush/global.env`. `--force` replaces the launcher, which you need after moving hush, since it records hush's path. Delete the `.app` to remove it.
+
+- **Open it from the launcher every time.** The Dock icon of the running app is the app's own: pinned and clicked later, it starts the app without hush. Pin the launcher instead.
+- **Opening the launcher again does nothing while the app runs.** The launcher stays out of the Dock and doesn't bring the app forward, so switch to the app as usual.
+- **Files aren't passed on.** "Open With" the launcher starts the app without the file.
+- **When hush fails, an alert shows why**, such as the app already running without its own user-data dir. An app that exits with an error on its own shows none. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
 
 ## Current scope (v0)
 

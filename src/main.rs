@@ -112,6 +112,11 @@ enum Command {
         #[command(subcommand)]
         action: KeychainAction,
     },
+    /// Make launchers that start an app through `hush run` (macOS).
+    App {
+        #[command(subcommand)]
+        action: AppAction,
+    },
     /// Choose which profile `hush run` uses in a project.
     Profile {
         #[command(subcommand)]
@@ -271,6 +276,33 @@ enum KeychainAction {
 }
 
 #[derive(Subcommand)]
+enum AppAction {
+    /// Write `~/Applications/APP (hush).app`, which opens from the Dock or
+    /// Spotlight and starts APP under `hush run`. It holds no secret.
+    Add {
+        /// An app's name in /Applications or ~/Applications, or the path of
+        /// its bundle.
+        app: String,
+        /// Hand this secret to the app, on top of
+        /// ~/.config/hush/global.env. Repeatable.
+        #[arg(long = "secret", value_name = "NAME")]
+        secrets: Vec<String>,
+        /// Use this profile's entries, and the unprofiled ones for names it
+        /// doesn't have.
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(long)]
+        env: Option<String>,
+        /// Replace this app's launcher if there is one already.
+        #[arg(long)]
+        force: bool,
+        /// Arguments for the app, such as `--user-data-dir DIR`.
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum ProfileAction {
     /// Make `hush run` in this project (its git root, else this directory)
     /// use profile NAME.
@@ -293,6 +325,11 @@ enum ProfileAction {
 fn main() -> ExitCode {
     harden::process();
     let cli = Cli::parse();
+    // A run's exit code is otherwise the child's.
+    let failure = match cli.command {
+        Command::Run { .. } => ExitCode::from(run::OWN_FAILURE),
+        _ => ExitCode::FAILURE,
+    };
     match dispatch(cli) {
         Ok(code) => code,
         Err(e) => {
@@ -300,7 +337,7 @@ fn main() -> ExitCode {
             // serde error quotes the vault value it rejected, and inside
             // `hush run` an agent can read this terminal.
             eprintln!("hush: {e}");
-            ExitCode::FAILURE
+            failure
         }
     }
 }
@@ -311,6 +348,7 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
         Command::Passwd => cmd_passwd(),
         Command::Secret { action } => cmd_secret(action),
         Command::Keychain { action } => cmd_keychain(action),
+        Command::App { action } => cmd_app(action),
         Command::Profile { action } => cmd_profile(action),
         Command::Run {
             profile,
@@ -448,6 +486,52 @@ fn resave_keychain(new: &str) -> Result<()> {
 #[cfg(not(target_os = "macos"))]
 fn cmd_keychain(_: KeychainAction) -> Result<ExitCode> {
     bail!("the keychain unlock is macOS only")
+}
+
+#[cfg(target_os = "macos")]
+fn cmd_app(action: AppAction) -> Result<ExitCode> {
+    use hush::{keychain, launcher};
+    match action {
+        AppAction::Add {
+            app,
+            secrets,
+            profile,
+            env,
+            force,
+            args,
+        } => {
+            profile_arg(profile.as_deref())?;
+            let run = launcher::RunArgs {
+                secrets: &secrets,
+                profile: profile.as_deref(),
+                env: env.as_deref(),
+                args: &args,
+            };
+            let home = PathBuf::from(std::env::var_os("HOME").context("HOME isn't set")?);
+            let dest = launcher::add(&app, &run, force, &home)?;
+            eprintln!(
+                "wrote {}; open it from Spotlight or keep it in the Dock",
+                dest.display()
+            );
+            // A launcher runs from /, so only these two sources name secrets.
+            if names::collect(Path::new("/"), &vault::global_env_path()?, &secrets)?.is_empty() {
+                eprintln!(
+                    "hush: warning: no secrets named, so the app gets no placeholders; use --secret or ~/.config/hush/global.env"
+                );
+            }
+            if !keychain::is_enabled().unwrap_or(false) {
+                eprintln!(
+                    "hush: warning: a launcher has no terminal to ask for the passphrase on, so it fails until you run `hush keychain enable`"
+                );
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cmd_app(_: AppAction) -> Result<ExitCode> {
+    bail!("app launchers are macOS only")
 }
 
 fn passphrase() -> Result<String> {

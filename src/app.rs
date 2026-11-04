@@ -79,7 +79,7 @@ fn bundle_of(path: &Path) -> Option<PathBuf> {
 }
 
 /// The app's name, as the Dock shows it.
-fn name(bundle: &Path) -> String {
+pub(crate) fn name(bundle: &Path) -> String {
     bundle
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -88,7 +88,7 @@ fn name(bundle: &Path) -> String {
 
 /// The `--user-data-dir` in `args`, either spelling.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn user_data_dir(args: &[String]) -> Option<&str> {
+pub(crate) fn user_data_dir(args: &[String]) -> Option<&str> {
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--user-data-dir" {
