@@ -755,7 +755,9 @@ fn replace_durably(path: &Path, contents: &[u8]) -> Result<()> {
     tmp.sync_all()?;
     fs::rename(&tmp_path, path)?;
     if let Some(dir) = path.parent() {
-        fs::File::open(dir)?.sync_all()?;
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .context("the vault was saved, but syncing its directory failed")?;
     }
     Ok(())
 }

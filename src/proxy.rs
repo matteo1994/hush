@@ -12,7 +12,8 @@ use rustls::{ClientConnection, ServerConnection, StreamOwned};
 
 use crate::tls::Mitm;
 
-#[derive(Debug, Clone)]
+/// Holds real values, so it has no `Debug`: a stray `{:?}` doesn't compile.
+#[derive(Clone)]
 pub struct PlaceholderEntry {
     pub real_value: String,
     pub host: String,
