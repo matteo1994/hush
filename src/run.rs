@@ -155,11 +155,7 @@ pub fn run(
     }
     // Before the passphrase: an app that hands the launch over gains nothing
     // from the run.
-    let shown: Vec<String> = cmd
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    app::refuse_if_running(&shown)?;
+    app::refuse_if_running(&cmd)?;
 
     let minted = {
         let vault = open_vault()?;
@@ -207,7 +203,7 @@ pub fn run(
     );
     // Only now: while the child ran, the terminal was its to draw on.
     if let Ok((_, Some(elapsed))) = &result {
-        app::warn_if_handed_off(&shown[0], *elapsed);
+        app::warn_if_handed_off(&cmd[0], *elapsed);
     }
     if let Some(summary) = errors.summary() {
         eprintln!("hush: {summary}");
