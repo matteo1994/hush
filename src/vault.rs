@@ -765,7 +765,6 @@ impl VaultEdit {
         save_vault(&self.vault, &self.passphrase)
     }
 
-    /// Saves under a new passphrase.
     /// Saves under a new passphrase. Takes `self`, so nothing can save again
     /// under the old one afterwards.
     pub fn save_with(self, passphrase: &str) -> Result<()> {
