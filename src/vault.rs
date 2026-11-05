@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -114,7 +115,8 @@ pub fn check_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` is written by hand so that a stray `{:?}` can't print a value.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretEntry {
     pub value: String,
@@ -136,13 +138,34 @@ pub struct SecretEntry {
     pub retired: Vec<Retired>,
 }
 
+impl fmt::Debug for SecretEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretEntry")
+            .field("value", &"<redacted>")
+            .field("bindings", &self.bindings)
+            .field("rotated_at", &self.rotated_at)
+            .field("max_age_secs", &self.max_age_secs)
+            .field("retired", &self.retired)
+            .finish()
+    }
+}
+
 /// A value `secret set --keep-old` stopped sending but still redacts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retired {
     pub value: String,
     /// Unix seconds. Redacted while `now < until`; `load_vault` drops it after.
     pub until: i64,
+}
+
+impl fmt::Debug for Retired {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Retired")
+            .field("value", &"<redacted>")
+            .field("until", &self.until)
+            .finish()
+    }
 }
 
 impl SecretEntry {
@@ -711,11 +734,31 @@ pub fn save_vault(vault: &Vault, passphrase: &str) -> Result<()> {
     writer.write_all(&plaintext)?;
     writer.finish()?;
 
-    let path = vault_path()?;
+    replace_durably(&vault_path()?, &encrypted)
+}
+
+/// Replaces `path` so that a crash leaves the old contents or the new ones,
+/// never a partial file, and the temp file is never readable by anyone else.
+#[cfg(unix)]
+fn replace_durably(path: &Path, contents: &[u8]) -> Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let tmp_path = path.with_extension("age.tmp");
-    fs::write(&tmp_path, &encrypted)?;
-    set_owner_only(&tmp_path)?;
-    fs::rename(&tmp_path, &path)?;
+    let mut tmp = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp_path)?;
+    // `mode` only applies to a file this call created, not to a leftover.
+    tmp.set_permissions(fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(contents)?;
+    tmp.sync_all()?;
+    fs::rename(&tmp_path, path)?;
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .context("the vault was saved, but syncing its directory failed")?;
+    }
     Ok(())
 }
 
@@ -726,16 +769,46 @@ pub fn set_private_mode(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_owner_only(path: &PathBuf) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_leaves_out_every_value() {
+        let entry = SecretEntry {
+            value: "sk-live".into(),
+            bindings: Vec::new(),
+            rotated_at: None,
+            max_age_secs: None,
+            retired: vec![Retired {
+                value: "sk-old".into(),
+                until: 1,
+            }],
+        };
+        let printed = format!("{entry:?}");
+        assert!(!printed.contains("sk-live"), "{printed}");
+        assert!(!printed.contains("sk-old"), "{printed}");
+    }
+
+    #[test]
+    fn replacing_a_file_keeps_it_private_even_over_a_leftover() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("hush-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vault.age");
+        let leftover = path.with_extension("age.tmp");
+        fs::write(&leftover, "partial write of an old attempt").unwrap();
+        fs::set_permissions(&leftover, fs::Permissions::from_mode(0o644)).unwrap();
+
+        replace_durably(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(!leftover.exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn splits_a_host_and_its_port() {
