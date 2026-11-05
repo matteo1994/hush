@@ -10,7 +10,9 @@
 //! left alone: some, like Ghostty, ship their CLI as the app's binary, which
 //! runs any number of times.
 
+use std::ffi::{OsStr, OsString};
 use std::io::Read;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -24,8 +26,8 @@ const HANDED_OFF_WITHIN: Duration = Duration::from_secs(10);
 
 /// The file `program` runs, found the way the shell would find it and
 /// through symlinks such as `/usr/local/bin/code`.
-fn resolve(program: &str) -> Option<PathBuf> {
-    let path = if program.contains('/') {
+fn resolve(program: &OsStr) -> Option<PathBuf> {
+    let path = if program.as_bytes().contains(&b'/') {
         PathBuf::from(program)
     } else {
         std::env::split_paths(&std::env::var_os("PATH")?)
@@ -119,7 +121,7 @@ fn same_dir(ours: Option<&str>, theirs: Option<&str>) -> bool {
 /// runs with the same `--user-data-dir` (or both without one), since the
 /// launch would be handed to it.
 #[cfg(target_os = "macos")]
-pub fn refuse_if_running(cmd: &[String]) -> Result<()> {
+pub fn refuse_if_running(cmd: &[OsString]) -> Result<()> {
     let Some((program, args)) = cmd.split_first() else {
         return Ok(());
     };
@@ -129,7 +131,11 @@ pub fn refuse_if_running(cmd: &[String]) -> Result<()> {
     let Some(bundle) = app_of(&exe) else {
         return Ok(());
     };
-    let ours = user_data_dir(args);
+    let args: Vec<String> = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    let ours = user_data_dir(&args);
     // The oldest is the app; a newer one can be a child it just forked,
     // which runs the same binary with the same arguments until it execs.
     let Some(pid) = procs::running(&exe)
@@ -153,7 +159,7 @@ pub fn refuse_if_running(cmd: &[String]) -> Result<()> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn refuse_if_running(_cmd: &[String]) -> Result<()> {
+pub fn refuse_if_running(_cmd: &[OsString]) -> Result<()> {
     Ok(())
 }
 
@@ -161,7 +167,7 @@ pub fn refuse_if_running(_cmd: &[String]) -> Result<()> {
 /// likely happened when it is an app that came back that fast. Covers what
 /// `refuse_if_running` can't see, such as a launcher script (`code`) that
 /// returns once the window is open.
-pub fn warn_if_handed_off(program: &str, elapsed: Duration) {
+pub fn warn_if_handed_off(program: &OsStr, elapsed: Duration) {
     if elapsed >= HANDED_OFF_WITHIN {
         return;
     }
@@ -341,7 +347,7 @@ mod tests {
             let path = dir.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, body).unwrap();
-            resolve(path.to_str().unwrap()).unwrap()
+            resolve(path.as_os_str()).unwrap()
         };
         std::fs::create_dir_all(
             dir.join("Outer.app/Contents/Frameworks/Electron Framework.framework"),
@@ -370,7 +376,7 @@ mod tests {
         // Not Electron: may well run any number of times.
         assert_eq!(app_of(&native), None);
         assert_eq!(launched_by(&native_launcher), None);
-        assert_eq!(resolve(dir.join("missing").to_str().unwrap()), None);
+        assert_eq!(resolve(dir.join("missing").as_os_str()), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

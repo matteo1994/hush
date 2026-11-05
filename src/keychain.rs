@@ -128,8 +128,8 @@ pub enum Unlocked {
 pub fn unlock(reason: &str) -> Unlocked {
     match confirm_owner(reason) {
         Ok(()) => {}
-        Err(None) => return Unlocked::Cancelled,
-        Err(Some(why)) => return Unlocked::Failed(why),
+        Err(Refused::Dismissed) => return Unlocked::Cancelled,
+        Err(Refused::Failed(why)) => return Unlocked::Failed(why),
     }
     let found = login_keychain().and_then(|kc| Ok(kc.find_generic_password(SERVICE, &account()?)?));
     match found {
@@ -141,15 +141,21 @@ pub fn unlock(reason: &str) -> Unlocked {
     }
 }
 
+/// Why `confirm_owner` didn't confirm.
+enum Refused {
+    Dismissed,
+    Failed(String),
+}
+
 /// Touch ID, or the login password where there is none (a closed lid, a
-/// Mac without a sensor). `Err(None)` when it was dismissed.
-fn confirm_owner(reason: &str) -> Result<(), Option<String>> {
+/// Mac without a sensor).
+fn confirm_owner(reason: &str) -> Result<(), Refused> {
     let policy = LAPolicy::DeviceOwnerAuthentication;
     // SAFETY: a fresh context, used on this thread only.
     let ctx = unsafe { LAContext::new() };
     // SAFETY: plain method calls on a live context.
     if let Err(e) = unsafe { ctx.canEvaluatePolicy_error(policy) } {
-        return Err(Some(e.localizedDescription().to_string()));
+        return Err(Refused::Failed(e.localizedDescription().to_string()));
     }
     let (tx, rx) = mpsc::channel();
     let reply = RcBlock::new(move |ok: Bool, err: *mut NSError| {
@@ -174,9 +180,9 @@ fn confirm_owner(reason: &str) -> Result<(), Option<String>> {
             .iter()
             .any(|c| c.0 == code) =>
         {
-            Err(None)
+            Err(Refused::Dismissed)
         }
-        Ok((false, code)) => Err(Some(format!(
+        Ok((false, code)) => Err(Refused::Failed(format!(
             "authentication failed (LAError {})",
             code.unwrap_or_default()
         ))),
@@ -184,13 +190,13 @@ fn confirm_owner(reason: &str) -> Result<(), Option<String>> {
             // SAFETY: a plain method call on a live context; it dismisses
             // the dialog, so a late answer unlocks nothing.
             unsafe { ctx.invalidate() };
-            Err(Some(format!(
+            Err(Refused::Failed(format!(
                 "no answer to the Touch ID prompt in {}s",
                 ANSWER_TIMEOUT.as_secs()
             )))
         }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err(Some("no answer from LocalAuthentication".into()))
+            Err(Refused::Failed("no answer from LocalAuthentication".into()))
         }
     }
 }

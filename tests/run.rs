@@ -400,6 +400,7 @@ fn a_running_app_is_not_launched_into() {
     assert!(stderr.contains("already inside"), "{stderr}");
     assert!(!stderr.contains("already running"), "{stderr}");
 
+    // SAFETY: takes plain integers.
     unsafe { libc::kill(-(running.id() as libc::pid_t), libc::SIGKILL) };
     running.wait().unwrap();
 }
@@ -436,6 +437,7 @@ kill $! 2>/dev/null
     received(&rx);
     wait_for(&ready);
     // As the terminal does: to every process in the group.
+    // SAFETY: takes plain integers.
     assert_eq!(unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) }, 0);
 
     let out = child.wait_with_output().unwrap();
@@ -870,5 +872,36 @@ fn wait_for(path: &Path) {
     while !path.exists() {
         assert!(start.elapsed() < Duration::from_secs(30), "{path:?}");
         thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Unix environments and arguments are bytes. One that isn't UTF-8 is none of
+/// hush's business and has to reach the child as it came.
+#[test]
+fn bytes_that_arent_utf8_reach_the_child_unchanged() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let (port, _rx) = upstream();
+    let home = Home::with_key("bytes", port);
+    let script =
+        "{ printf %s \"$RAW\" | od -An -tx1; printf %s \"$1\" | od -An -tx1; } | tr -s ' '";
+    let raw = OsStr::from_bytes(b"caf\xe9");
+    for args in [
+        &[
+            "run", "--secret", "DEMO_KEY", "--", "sh", "-c", script, "sh",
+        ][..],
+        // No secrets means no proxy, a separate path through `run`.
+        &["run", "--", "sh", "-c", script, "sh"][..],
+    ] {
+        let mut cmd = home.hush(args);
+        cmd.arg(raw).env("RAW", raw);
+        let out = home.ok(cmd);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.matches("63 61 66 e9").count(),
+            2,
+            "{args:?}: {stdout}"
+        );
     }
 }

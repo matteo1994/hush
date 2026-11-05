@@ -16,12 +16,15 @@ pub fn process() {
     // Linux: no ptrace, /proc/<pid>/mem or core dump from the same user.
     // Reset by exec, so the child is unaffected.
     #[cfg(target_os = "linux")]
+    // SAFETY: PR_SET_DUMPABLE takes plain integers and touches no memory.
     if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
         warn("make this process non-dumpable");
     }
     // macOS: debuggers attach through ptrace, which this refuses. Core dumps
     // need their own limit, as nothing else stops one.
     #[cfg(target_os = "macos")]
+    // SAFETY: PT_DENY_ATTACH ignores its address, the all-zero `rlimit` is a
+    // valid one, and the two rlimit calls only touch that local.
     unsafe {
         if libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) != 0 {
             warn("refuse debugger attach");

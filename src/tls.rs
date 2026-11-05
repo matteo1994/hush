@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose,
@@ -76,9 +76,7 @@ impl Mitm {
         leaves.insert(host.to_string(), cfg.clone());
         Ok(cfg)
     }
-}
 
-impl Mitm {
     fn issue_leaf(&self, host: &str) -> Result<(CertificateDer<'static>, PrivateKeyDer<'static>)> {
         let mut params = CertificateParams::new(vec![host.to_string()])?;
         params.distinguished_name.push(DnType::CommonName, host);
@@ -110,7 +108,7 @@ pub fn native_roots() -> Result<(RootCertStore, Vec<CertificateDer<'static>>)> {
     let mut store = RootCertStore::empty();
     let (added, _) = store.add_parsable_certificates(loaded.certs.iter().cloned());
     if added == 0 {
-        anyhow::bail!("no usable root certificates found in the system trust store");
+        bail!("no usable root certificates found in the system trust store");
     }
     Ok((store, loaded.certs))
 }
