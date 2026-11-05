@@ -89,21 +89,37 @@ impl ErrorLog {
     }
 }
 
+/// Wait before accepting again after `accept` failed.
+const ACCEPT_RETRY: Duration = Duration::from_millis(50);
+
 pub fn start_proxy(table: PlaceholderTable, mitm: Arc<Mitm>, errors: Arc<ErrorLog>) -> Result<u16> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
 
     thread::spawn(move || {
         for stream in listener.incoming() {
-            let Ok(client) = stream else { continue };
+            let client = match stream {
+                Ok(client) => client,
+                Err(e) => {
+                    errors.record(format!("accepting a connection: {e}"));
+                    // Out of file descriptors, say: this would fail again at once.
+                    thread::sleep(ACCEPT_RETRY);
+                    continue;
+                }
+            };
             let table = table.clone();
             let mitm = mitm.clone();
-            let errors = errors.clone();
-            thread::spawn(move || {
+            let thread_errors = errors.clone();
+            let handler = thread::Builder::new().spawn(move || {
                 if let Err(e) = handle_connection(client, &table, &mitm) {
-                    errors.record(format!("{e:#}"));
+                    thread_errors.record(format!("{e:#}"));
                 }
             });
+            // `thread::spawn` would panic here, ending the proxy for the rest
+            // of the run and printing over the child's screen.
+            if let Err(e) = handler {
+                errors.record(format!("starting a connection thread: {e}"));
+            }
         }
     });
 
