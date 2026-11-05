@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.2.0 (2026-11-05)
+
+- Pass non-UTF-8 env vars and args to the child unchanged; release 0.2.0 (#60)
+
 ## 0.1.32 (2026-11-05)
 
 - Save the vault durably, redact Debug output, and keep the proxy accepting (#58)
