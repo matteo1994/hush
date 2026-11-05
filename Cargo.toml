@@ -1,6 +1,6 @@
 [package]
 name = "hush-secrets"
-version = "0.1.32"
+version = "0.2.0"
 edition = "2024"
 # cargo install ignores rust-toolchain.toml; File::lock needs 1.89.
 rust-version = "1.89"
@@ -54,3 +54,8 @@ x509-parser = "0.18"
 [lints.rust]
 # Set by cargo-fuzz; see fuzz/.
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[lints.clippy]
+# unsafe needs saying why it holds, and hush has real values to keep safe.
+undocumented_unsafe_blocks = "warn"
+format_push_string = "warn"

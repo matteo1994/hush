@@ -40,10 +40,10 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
         bail!("--user-data-dir {dir} must be an absolute path, as a launcher runs from /");
     }
     let bundle = find_app(app_name, home)?;
-    let plist = bundle.join("Contents/Info.plist");
-    if plist_value(&plist, "CFBundleIdentifier").is_some_and(|id| id.starts_with(ID_PREFIX)) {
+    if is_launcher(&bundle) {
         bail!("{} is itself a hush launcher", bundle.display());
     }
+    let plist = bundle.join("Contents/Info.plist");
     let executable = plist_value(&plist, "CFBundleExecutable")
         .with_context(|| format!("{} names no executable", plist.display()))?;
     let binary = bundle.join("Contents/MacOS").join(executable);
@@ -55,9 +55,7 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     let folder = home.join("Applications");
     let dest = folder.join(format!("{name} (hush).app"));
     if dest.exists() {
-        let ours = plist_value(&dest.join("Contents/Info.plist"), "CFBundleIdentifier")
-            .is_some_and(|id| id.starts_with(ID_PREFIX));
-        if !ours {
+        if !is_launcher(&dest) {
             bail!(
                 "{} exists and isn't a hush launcher; move it first",
                 dest.display()
@@ -81,21 +79,31 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     Ok(dest)
 }
 
+/// Whether `bundle` is one `add` wrote.
+fn is_launcher(bundle: &Path) -> bool {
+    plist_value(&bundle.join("Contents/Info.plist"), "CFBundleIdentifier")
+        .is_some_and(|id| id.starts_with(ID_PREFIX))
+}
+
+/// The bundle's icon file in `Contents/Resources`. Newer apps may only have
+/// an asset catalog, which `None` leaves the launcher without.
+fn icon_file(bundle: &Path) -> Option<String> {
+    let icon = plist_value(&bundle.join("Contents/Info.plist"), "CFBundleIconFile")?;
+    let file = if Path::new(&icon).extension().is_some() {
+        icon
+    } else {
+        format!("{icon}.icns")
+    };
+    bundle
+        .join("Contents/Resources")
+        .join(&file)
+        .is_file()
+        .then_some(file)
+}
+
 /// The launcher's files, in `tmp`.
 fn write_bundle(tmp: &Path, name: &str, bundle: &Path, binary: &Path, run: &RunArgs) -> Result<()> {
-    let plist = bundle.join("Contents/Info.plist");
-    let icon = plist_value(&plist, "CFBundleIconFile").and_then(|icon| {
-        let file = if Path::new(&icon).extension().is_some() {
-            icon
-        } else {
-            format!("{icon}.icns")
-        };
-        bundle
-            .join("Contents/Resources")
-            .join(&file)
-            .is_file()
-            .then_some(file)
-    });
+    let icon = icon_file(bundle);
     fs::create_dir_all(tmp.join("Contents/MacOS"))?;
     fs::write(
         tmp.join("Contents/Info.plist"),

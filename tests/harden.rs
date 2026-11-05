@@ -42,6 +42,7 @@ fn child_keeps_the_core_limit_hush_started_with() {
 #[cfg(target_os = "linux")]
 #[test]
 fn child_cannot_read_hush_memory() {
+    // SAFETY: takes no arguments.
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("running as root, which may read anything; skipping");
         return;

@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use rand::RngCore;
@@ -94,39 +95,40 @@ fn generate_placeholder() -> String {
 
 /// The child's environment: the parent's, minus hush's own inputs, plus
 /// placeholders and — when a proxy is running — proxy and CA trust settings.
+/// Variables stay bytes: `std::env::vars` panics on one that isn't UTF-8.
 pub fn child_env(
-    parent: impl IntoIterator<Item = (String, String)>,
+    parent: impl IntoIterator<Item = (OsString, OsString)>,
     placeholders: &HashMap<String, String>,
     proxy: Option<(u16, &TrustFiles)>,
-) -> HashMap<String, String> {
-    let mut env: HashMap<String, String> = parent
+) -> HashMap<OsString, OsString> {
+    let mut env: HashMap<OsString, OsString> = parent
         .into_iter()
-        .filter(|(k, _)| !SCRUBBED_VARS.contains(&k.as_str()))
+        .filter(|(k, _)| !SCRUBBED_VARS.iter().any(|var| OsStr::new(var) == k))
         .collect();
-    env.extend(placeholders.iter().map(|(k, v)| (k.clone(), v.clone())));
-    env.insert(ACTIVE_VAR.to_string(), "1".to_string());
+    env.extend(
+        placeholders
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v))),
+    );
+    env.insert(ACTIVE_VAR.into(), "1".into());
 
     if let Some((port, trust)) = proxy {
         let proxy_url = format!("http://127.0.0.1:{port}");
         for var in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
-            env.insert(var.to_string(), proxy_url.clone());
+            env.insert(var.into(), proxy_url.clone().into());
         }
         // These replace the default roots, so they get system roots + CA.
-        let bundle = trust.bundle.display().to_string();
         for var in [
             "SSL_CERT_FILE",
             "REQUESTS_CA_BUNDLE",
             "CURL_CA_BUNDLE",
             "GIT_SSL_CAINFO",
         ] {
-            env.insert(var.to_string(), bundle.clone());
+            env.insert(var.into(), trust.bundle.clone().into());
         }
         // Node appends to its roots instead, and only honors proxy env vars when asked to.
-        env.insert(
-            "NODE_EXTRA_CA_CERTS".to_string(),
-            trust.ca.display().to_string(),
-        );
-        env.insert("NODE_USE_ENV_PROXY".to_string(), "1".to_string());
+        env.insert("NODE_EXTRA_CA_CERTS".into(), trust.ca.clone().into());
+        env.insert("NODE_USE_ENV_PROXY".into(), "1".into());
     }
     env
 }
@@ -139,7 +141,7 @@ pub fn run(
     profile: Option<String>,
     cwd: &Path,
     env: Option<String>,
-    cmd: Vec<String>,
+    cmd: Vec<OsString>,
     open_vault: impl FnOnce() -> Result<vault::Vault>,
 ) -> Result<ExitCode> {
     if std::env::var_os(ACTIVE_VAR).is_some() {
@@ -149,8 +151,7 @@ pub fn run(
         );
     }
     if names.is_empty() {
-        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None))
-            .map(|(code, _)| code);
+        return spawn_without_proxy(&cmd);
     }
     // Before the passphrase: an app that hands the launch over gains nothing
     // from the run.
@@ -182,8 +183,7 @@ pub fn run(
         eprintln!("hush: warning: {warning}");
     }
     if minted.table.is_empty() {
-        return spawn(&cmd, child_env(std::env::vars(), &HashMap::new(), None))
-            .map(|(code, _)| code);
+        return spawn_without_proxy(&cmd);
     }
 
     let (upstream_roots, system_roots) = tls::native_roots()?;
@@ -191,11 +191,15 @@ pub fn run(
     let run_dir = RunDir::create()?;
     let trust = tls::write_trust_files(&mitm, &system_roots, run_dir.path())?;
     let errors = Arc::new(ErrorLog::default());
-    let port = start_proxy(Arc::new(Mutex::new(minted.table)), mitm, errors.clone())?;
+    let port = start_proxy(minted.table, mitm, errors.clone())?;
 
     let result = spawn(
         &cmd,
-        child_env(std::env::vars(), &minted.placeholders, Some((port, &trust))),
+        &child_env(
+            std::env::vars_os(),
+            &minted.placeholders,
+            Some((port, &trust)),
+        ),
     );
     // Only now: while the child ran, the terminal was its to draw on.
     if let Ok((_, Some(elapsed))) = &result {
@@ -236,24 +240,33 @@ fn mapped_profile(vault: &Vault, cwd: &Path) -> Option<String> {
     None
 }
 
+/// A run with nothing to inject: no placeholders, so no proxy either.
+fn spawn_without_proxy(cmd: &[OsString]) -> Result<ExitCode> {
+    let env = child_env(std::env::vars_os(), &HashMap::new(), None);
+    spawn(cmd, &env).map(|(code, _)| code)
+}
+
 /// The child's exit code, and how long it ran when it succeeded.
 fn spawn(
-    cmd: &[String],
-    env: HashMap<String, String>,
+    cmd: &[OsString],
+    env: &HashMap<OsString, OsString>,
 ) -> Result<(ExitCode, Option<std::time::Duration>)> {
     let (program, args) = cmd
         .split_first()
         .expect("clap requires at least one cmd arg");
     let mut cmd = Command::new(program);
-    cmd.args(args).env_clear().envs(&env);
+    cmd.args(args).env_clear().envs(env);
     harden::restore_for_child(&mut cmd);
     let started = std::time::Instant::now();
-    let mut child = cmd.spawn().with_context(|| format!("starting {program}"))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("starting {}", program.display()))?;
 
     // Ctrl-C / Ctrl-\ go to the whole foreground process group. The child
     // decides what they mean (an interactive agent may just cancel a step);
     // this process must outlive it, or the proxy vanishes mid-session. Set
     // only after spawning, so the child keeps the default dispositions.
+    // SAFETY: SIG_IGN installs no handler, so nothing runs in signal context.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
@@ -315,6 +328,7 @@ fn sweep_stale(runs: &Path) {
 fn process_exists(pid: libc::pid_t) -> bool {
     // Signal 0 checks for existence without sending anything. EPERM means it
     // exists but belongs to someone else.
+    // SAFETY: takes plain integers, and signal 0 delivers nothing.
     let signalled = unsafe { libc::kill(pid, 0) } == 0;
     signalled || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
@@ -585,7 +599,7 @@ mod tests {
         );
     }
 
-    fn parent() -> Vec<(String, String)> {
+    fn parent() -> Vec<(OsString, OsString)> {
         [
             ("PATH", "/usr/bin"),
             ("HUSH_PASSPHRASE", "hunter2"),
@@ -594,8 +608,12 @@ mod tests {
             ("BILLING_API_KEY", "whatever-the-shell-had"),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(k, v)| (k.into(), v.into()))
         .collect()
+    }
+
+    fn var<'a>(env: &'a HashMap<OsString, OsString>, name: &str) -> &'a str {
+        env[OsStr::new(name)].to_str().unwrap()
     }
 
     #[test]
@@ -608,28 +626,29 @@ mod tests {
         };
         let env = child_env(parent(), &placeholders, Some((4242, &trust)));
 
-        assert!(!env.contains_key("HUSH_PASSPHRASE"));
-        assert!(!env.contains_key("HUSH_NEW_PASSPHRASE"));
-        assert!(!env.contains_key("HUSH_SECRET_VALUE"));
-        assert_eq!(env["PATH"], "/usr/bin");
+        assert!(!env.contains_key(OsStr::new("HUSH_PASSPHRASE")));
+        assert!(!env.contains_key(OsStr::new("HUSH_NEW_PASSPHRASE")));
+        assert!(!env.contains_key(OsStr::new("HUSH_SECRET_VALUE")));
+        assert_eq!(var(&env, "PATH"), "/usr/bin");
         assert_eq!(
-            env["BILLING_API_KEY"], "hush_ph_x",
+            var(&env, "BILLING_API_KEY"),
+            "hush_ph_x",
             "placeholder overrides the inherited value"
         );
-        assert_eq!(env[ACTIVE_VAR], "1");
-        for var in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
-            assert_eq!(env[var], "http://127.0.0.1:4242", "{var}");
+        assert_eq!(var(&env, ACTIVE_VAR), "1");
+        for name in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"] {
+            assert_eq!(var(&env, name), "http://127.0.0.1:4242", "{name}");
         }
-        for var in [
+        for name in [
             "SSL_CERT_FILE",
             "REQUESTS_CA_BUNDLE",
             "CURL_CA_BUNDLE",
             "GIT_SSL_CAINFO",
         ] {
-            assert_eq!(env[var], "/run/ca-bundle.pem", "{var}");
+            assert_eq!(var(&env, name), "/run/ca-bundle.pem", "{name}");
         }
-        assert_eq!(env["NODE_EXTRA_CA_CERTS"], "/run/ca.pem");
-        assert_eq!(env["NODE_USE_ENV_PROXY"], "1");
+        assert_eq!(var(&env, "NODE_EXTRA_CA_CERTS"), "/run/ca.pem");
+        assert_eq!(var(&env, "NODE_USE_ENV_PROXY"), "1");
     }
 
     #[test]
@@ -660,9 +679,9 @@ mod tests {
     #[test]
     fn child_env_without_proxy_still_scrubs() {
         let env = child_env(parent(), &HashMap::new(), None);
-        assert!(!env.contains_key("HUSH_PASSPHRASE"));
-        assert!(!env.contains_key("HUSH_NEW_PASSPHRASE"));
-        assert!(!env.contains_key("HTTPS_PROXY"));
-        assert_eq!(env[ACTIVE_VAR], "1");
+        assert!(!env.contains_key(OsStr::new("HUSH_PASSPHRASE")));
+        assert!(!env.contains_key(OsStr::new("HUSH_NEW_PASSPHRASE")));
+        assert!(!env.contains_key(OsStr::new("HTTPS_PROXY")));
+        assert_eq!(var(&env, ACTIVE_VAR), "1");
     }
 }
