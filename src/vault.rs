@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
+use std::net::IpAddr;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use age::secrecy::SecretString;
@@ -48,9 +50,7 @@ impl Binding {
             allow_http,
         }
     }
-}
 
-impl Binding {
     /// The bound host's name, and the port `--host` named, if any.
     pub fn host_and_port(&self) -> (String, Option<u16>) {
         split_host(&self.host)
@@ -84,7 +84,7 @@ pub fn is_loopback_name(name: &str) -> bool {
     name == "localhost"
         || name.ends_with(".localhost")
         || name
-            .parse::<std::net::IpAddr>()
+            .parse::<IpAddr>()
             .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
@@ -93,7 +93,7 @@ pub fn is_loopback_name(name: &str) -> bool {
 /// (`localhost` is both `127.0.0.1` and `::1`), so the proxy only sends a key
 /// to the exact socket a binding names: a loopback address and a port.
 pub fn unusable_loopback(name: &str, port: Option<u16>) -> bool {
-    is_loopback_name(name) && (port.is_none() || name.parse::<std::net::IpAddr>().is_err())
+    is_loopback_name(name) && (port.is_none() || name.parse::<IpAddr>().is_err())
 }
 
 /// Refuses a `--host` that can never be used: a port that isn't one, or a
@@ -103,7 +103,7 @@ pub fn check_host(host: &str) -> Result<()> {
         bail!("--host is empty");
     }
     let (name, port) = split_host(host);
-    if name.contains(':') && !name.contains("::") && name.parse::<std::net::IpAddr>().is_err() {
+    if name.contains(':') && !name.contains("::") && name.parse::<IpAddr>().is_err() {
         bail!("--host {host}: not a valid port");
     }
     if unusable_loopback(&name, port) {
@@ -115,7 +115,7 @@ pub fn check_host(host: &str) -> Result<()> {
     Ok(())
 }
 
-/// `Debug` is written by hand so that a stray `{:?}` can't print a value.
+/// `Debug` leaves the values out, so printing one can't reveal a key.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretEntry {
@@ -145,12 +145,13 @@ impl fmt::Debug for SecretEntry {
             .field("bindings", &self.bindings)
             .field("rotated_at", &self.rotated_at)
             .field("max_age_secs", &self.max_age_secs)
-            .field("retired", &self.retired)
+            .field("retired", &self.retired.len())
             .finish()
     }
 }
 
-/// A value `secret set --keep-old` stopped sending but still redacts.
+/// A value `secret set --keep-old` stopped sending but still redacts. It has
+/// no `Debug`: see `SecretEntry`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retired {
@@ -159,12 +160,9 @@ pub struct Retired {
     pub until: i64,
 }
 
-impl fmt::Debug for Retired {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Retired")
-            .field("value", &"<redacted>")
-            .field("until", &self.until)
-            .finish()
+impl Retired {
+    fn is_live(&self, now: i64) -> bool {
+        self.until > now
     }
 }
 
@@ -239,17 +237,19 @@ impl SecretEntry {
 
     /// One line for `secret ls`. It names ages, never the value.
     pub fn age_label(&self, now: i64) -> String {
+        use std::fmt::Write as _;
         let Some(rotated) = self.rotated_at else {
             return "age unknown".to_string();
         };
         let age = age_secs(rotated, now);
         let mut line = format!("rotated {}", format_age(age));
-        if let Some(max) = self.max_age_secs {
-            if age >= max {
-                line.push_str(&format!(", overdue (max age {})", format_span(max)));
+        if let Some(max_secs) = self.max_age_secs {
+            let max = format_span(max_secs);
+            let _ = if age >= max_secs {
+                write!(line, ", overdue (max age {max})")
             } else {
-                line.push_str(&format!(", max age {}", format_span(max)));
-            }
+                write!(line, ", max age {max}")
+            };
         }
         line
     }
@@ -269,11 +269,21 @@ impl SecretEntry {
         ))
     }
 
+    /// Replaces the value and restarts its age. With `keep_old_for` (seconds),
+    /// the previous one stays redacted from responses for that long.
+    pub fn set_value(&mut self, value: String, keep_old_for: Option<u64>, now: i64) {
+        if let Some(secs) = keep_old_for {
+            self.retire_current(&value, until_unix(now, secs), now);
+        }
+        self.value = value;
+        self.rotated_at = Some(now);
+    }
+
     /// Keeps the current value for response redaction until `until`. A value
     /// equal to `new_value` is not kept twice (it is scrubbed as the live
     /// value), and an empty one is not a secret. Leaves `self.value` empty
     /// when it was retired; the caller stores the new value.
-    pub fn retire_current(&mut self, new_value: &str, until: i64, now: i64) {
+    fn retire_current(&mut self, new_value: &str, until: i64, now: i64) {
         self.prune_retired(now);
         self.retired.retain(|r| r.value != new_value);
         if !self.value.is_empty() && self.value != new_value {
@@ -285,14 +295,14 @@ impl SecretEntry {
     }
 
     pub fn prune_retired(&mut self, now: i64) {
-        self.retired.retain(|r| r.until > now);
+        self.retired.retain(|r| r.is_live(now));
     }
 
     /// Values a run should redact and must not send. Expired ones are omitted.
     pub fn live_retired(&self, now: i64) -> Vec<String> {
         self.retired
             .iter()
-            .filter(|r| r.until > now)
+            .filter(|r| r.is_live(now))
             .map(|r| r.value.clone())
             .collect()
     }
@@ -302,7 +312,7 @@ impl SecretEntry {
         let left: Vec<u64> = self
             .retired
             .iter()
-            .filter(|r| r.until > now)
+            .filter(|r| r.is_live(now))
             .map(|r| u64::try_from(r.until.saturating_sub(now)).unwrap_or(0))
             .collect();
         let soonest = *left.iter().min()?;
@@ -320,9 +330,13 @@ impl SecretEntry {
 }
 
 /// `now` plus `secs`, saturating so a huge duration stays inside i64.
-pub fn until_unix(now: i64, secs: u64) -> i64 {
+fn until_unix(now: i64, secs: u64) -> i64 {
     now.saturating_add(i64::try_from(secs).unwrap_or(i64::MAX))
 }
+
+const MINUTE: u64 = 60;
+const HOUR: u64 = 60 * MINUTE;
+const DAY: u64 = 24 * HOUR;
 
 fn age_secs(rotated_at: i64, now: i64) -> u64 {
     u64::try_from(now.saturating_sub(rotated_at).max(0)).unwrap_or(u64::MAX)
@@ -347,10 +361,10 @@ pub fn parse_duration(text: &str) -> Result<u64> {
     }
     let factor: u64 = match unit.to_ascii_lowercase().as_str() {
         "s" => 1,
-        "m" => 60,
-        "h" => 60 * 60,
-        "d" => 60 * 60 * 24,
-        "w" => 60 * 60 * 24 * 7,
+        "m" => MINUTE,
+        "h" => HOUR,
+        "d" => DAY,
+        "w" => 7 * DAY,
         _ => bail!("duration {text:?}: unit must be s, m, h, d or w"),
     };
     n.checked_mul(factor)
@@ -376,24 +390,24 @@ fn format_age(secs: u64) -> String {
 
 /// The configured span, which divides evenly into the unit it was given as.
 fn format_span(secs: u64) -> String {
-    if secs.is_multiple_of(86400) {
-        format!("{}d", secs / 86400)
-    } else if secs.is_multiple_of(3600) {
-        format!("{}h", secs / 3600)
-    } else if secs.is_multiple_of(60) {
-        format!("{}m", secs / 60)
+    if secs.is_multiple_of(DAY) {
+        format!("{}d", secs / DAY)
+    } else if secs.is_multiple_of(HOUR) {
+        format!("{}h", secs / HOUR)
+    } else if secs.is_multiple_of(MINUTE) {
+        format!("{}m", secs / MINUTE)
     } else {
         format!("{secs}s")
     }
 }
 
 fn format_span_floored(secs: u64) -> String {
-    if secs >= 86400 {
-        format!("{}d", secs / 86400)
-    } else if secs >= 3600 {
-        format!("{}h", secs / 3600)
-    } else if secs >= 60 {
-        format!("{}m", secs / 60)
+    if secs >= DAY {
+        format!("{}d", secs / DAY)
+    } else if secs >= HOUR {
+        format!("{}h", secs / HOUR)
+    } else if secs >= MINUTE {
+        format!("{}m", secs / MINUTE)
     } else {
         format!("{secs}s")
     }
@@ -641,13 +655,13 @@ pub fn runs_dir() -> Result<PathBuf> {
 
 /// Held across a load-modify-save, so two `hush secret` commands running at
 /// once can't each save over the other's change. Released when dropped.
-pub struct VaultLock {
+struct VaultLock {
     _file: fs::File,
 }
 
 /// Takes the vault lock, waiting for another hush command that holds it. The
 /// lock is a separate file because saving replaces `vault.age` by rename.
-pub fn lock_vault() -> Result<VaultLock> {
+fn lock_vault() -> Result<VaultLock> {
     let path = config_dir()?.join("vault.lock");
     if let Some(lock) = try_lock_at(&path)? {
         return Ok(lock);
@@ -676,10 +690,13 @@ fn open_lock_file(path: &Path) -> Result<fs::File> {
         .write(true)
         .create(true)
         .truncate(false)
-        .mode(0o600)
+        .mode(OWNER_ONLY)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))
 }
+
+/// Mode of the vault and its lock file.
+const OWNER_ONLY: u32 = 0o600;
 
 pub fn vault_exists() -> Result<bool> {
     Ok(vault_path()?.exists())
@@ -724,7 +741,37 @@ pub fn load_vault(passphrase: &str) -> Result<Vault> {
     Ok(vault)
 }
 
-pub fn save_vault(vault: &Vault, passphrase: &str) -> Result<()> {
+/// The vault, open to change it. The lock is taken before the load and held
+/// until this is dropped, so two commands can't each save over the other's
+/// change, and only this can write an existing vault.
+pub struct VaultEdit {
+    pub vault: Vault,
+    passphrase: String,
+    _lock: VaultLock,
+}
+
+impl VaultEdit {
+    pub fn open(passphrase: String) -> Result<Self> {
+        let lock = lock_vault()?;
+        let vault = load_vault(&passphrase)?;
+        Ok(VaultEdit {
+            vault,
+            passphrase,
+            _lock: lock,
+        })
+    }
+
+    pub fn save(&self) -> Result<()> {
+        save_vault(&self.vault, &self.passphrase)
+    }
+
+    /// Saves under a new passphrase.
+    pub fn save_with(&self, passphrase: &str) -> Result<()> {
+        save_vault(&self.vault, passphrase)
+    }
+}
+
+fn save_vault(vault: &Vault, passphrase: &str) -> Result<()> {
     let plaintext = serde_json::to_vec(vault)?;
     let secret = SecretString::from(passphrase.to_string());
     let encryptor = age::Encryptor::with_user_passphrase(secret);
@@ -737,20 +784,20 @@ pub fn save_vault(vault: &Vault, passphrase: &str) -> Result<()> {
     replace_durably(&vault_path()?, &encrypted)
 }
 
-/// Replaces `path` so that a crash leaves the old contents or the new ones,
-/// never a partial file, and the temp file is never readable by anyone else.
-#[cfg(unix)]
+/// Replaces `path` so a crash leaves the old contents or the new, never an
+/// empty file: without the syncs, a rename can reach the disk before the data
+/// it names. The vault is the only copy of every key in it.
 fn replace_durably(path: &Path, contents: &[u8]) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::os::unix::fs::OpenOptionsExt;
     let tmp_path = path.with_extension("age.tmp");
     let mut tmp = fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)
+        .mode(OWNER_ONLY)
         .open(&tmp_path)?;
     // `mode` only applies to a file this call created, not to a leftover.
-    tmp.set_permissions(fs::Permissions::from_mode(0o600))?;
+    tmp.set_permissions(fs::Permissions::from_mode(OWNER_ONLY))?;
     tmp.write_all(contents)?;
     tmp.sync_all()?;
     fs::rename(&tmp_path, path)?;
@@ -760,9 +807,7 @@ fn replace_durably(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-pub fn set_private_mode(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+pub fn set_private_mode(path: &Path) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
@@ -790,7 +835,6 @@ mod tests {
 
     #[test]
     fn replacing_a_file_keeps_it_private_even_over_a_leftover() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("hush-replace-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
@@ -803,7 +847,7 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), b"new");
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        assert_eq!(mode, OWNER_ONLY);
         assert!(!leftover.exists());
         fs::remove_dir_all(&dir).unwrap();
     }

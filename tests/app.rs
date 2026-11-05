@@ -13,9 +13,11 @@ struct Home(PathBuf);
 
 impl Home {
     fn new(name: &str) -> Home {
+        // The temp dir is behind a symlink on macOS.
         let dir = std::env::temp_dir()
-            .join(format!("hush-app-{name}-{}", std::process::id()))
-            .canonicalize_or_self();
+            .canonicalize()
+            .unwrap()
+            .join(format!("hush-app-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("bin")).unwrap();
         let home = Home(dir);
@@ -101,18 +103,6 @@ impl Home {
 impl Drop for Home {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-trait CanonicalizeOrSelf {
-    fn canonicalize_or_self(self) -> PathBuf;
-}
-
-impl CanonicalizeOrSelf for PathBuf {
-    /// The temp dir is behind a symlink on macOS; the parent exists.
-    fn canonicalize_or_self(self) -> PathBuf {
-        let parent = self.parent().unwrap().canonicalize().unwrap();
-        parent.join(self.file_name().unwrap())
     }
 }
 

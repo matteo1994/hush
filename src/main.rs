@@ -1,9 +1,10 @@
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use hush::vault::Binding;
 use hush::{harden, names, run, vault};
@@ -137,58 +138,16 @@ enum Command {
         #[arg(long = "secret", value_name = "NAME")]
         secrets: Vec<String>,
         #[arg(last = true, required = true)]
-        cmd: Vec<String>,
+        cmd: Vec<OsString>,
     },
 }
 
 #[derive(Subcommand)]
 enum SecretAction {
     /// Add a new secret and its host binding (prompts for the value, hidden).
-    Add {
-        name: String,
-        #[arg(long)]
-        host: String,
-        #[arg(long)]
-        env: Option<String>,
-        #[arg(long)]
-        header: Option<String>,
-        #[arg(long)]
-        format: Option<String>,
-        /// Also swap over plain HTTP to a non-loopback host, sending the real
-        /// value unencrypted. Off by default.
-        #[arg(long)]
-        allow_http: bool,
-        /// Replace NAME, value and bindings, if it already exists, without
-        /// asking first. To replace only the value, use `secret set`.
-        #[arg(long)]
-        force: bool,
-        /// Warn from `hush run` once the value is older than this (`90d`,
-        /// `12h`, `30m`). The clock starts when the value is set.
-        #[arg(long, value_name = "DURATION")]
-        max_age: Option<String>,
-        /// Work on this profile's entries instead of the unprofiled ones.
-        #[arg(long, value_name = "NAME")]
-        profile: Option<String>,
-    },
+    Add(AddArgs),
     /// Replace a secret's value and keep its bindings.
-    Set {
-        name: String,
-        /// Read one value from stdin instead of prompting. A single trailing
-        /// newline is removed; the rest, spaces included, is the value.
-        #[arg(long)]
-        stdin: bool,
-        /// Warn from `hush run` once the value is older than this (`90d`,
-        /// `12h`, `30m`), or `none` to clear a limit. Omit to leave it.
-        #[arg(long, value_name = "DURATION")]
-        max_age: Option<String>,
-        /// Keep redacting the previous value from responses for this long
-        /// (`7d`, `12h`). It is never sent. Without this, it is forgotten.
-        #[arg(long, value_name = "DURATION")]
-        keep_old: Option<String>,
-        /// Work on this profile's entries instead of the unprofiled ones.
-        #[arg(long, value_name = "NAME")]
-        profile: Option<String>,
-    },
+    Set(SetArgs),
     /// Copy a secret, with its bindings, to another profile or to the
     /// unprofiled entries. The copy is separate: rotate each one.
     Cp {
@@ -231,18 +190,8 @@ enum SecretAction {
     /// Add another host binding to an existing secret.
     Bind {
         name: String,
-        #[arg(long)]
-        host: String,
-        #[arg(long)]
-        env: Option<String>,
-        #[arg(long)]
-        header: Option<String>,
-        #[arg(long)]
-        format: Option<String>,
-        /// Also swap over plain HTTP to a non-loopback host, sending the real
-        /// value unencrypted. Off by default.
-        #[arg(long)]
-        allow_http: bool,
+        #[command(flatten)]
+        binding: BindingArgs,
         /// Work on this profile's entries instead of the unprofiled ones.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
@@ -262,6 +211,75 @@ enum SecretAction {
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
+}
+
+/// Where a secret goes and how it is sent, for `secret add` and `secret bind`.
+#[derive(Args)]
+struct BindingArgs {
+    #[arg(long)]
+    host: String,
+    #[arg(long)]
+    env: Option<String>,
+    #[arg(long)]
+    header: Option<String>,
+    #[arg(long)]
+    format: Option<String>,
+    /// Also swap over plain HTTP to a non-loopback host, sending the real
+    /// value unencrypted. Off by default.
+    #[arg(long)]
+    allow_http: bool,
+}
+
+impl BindingArgs {
+    /// Refuses a `--host` that could never be used.
+    fn into_binding(self) -> Result<Binding> {
+        vault::check_host(&self.host)?;
+        Ok(Binding::new(
+            self.host,
+            self.env,
+            self.header,
+            self.format,
+            self.allow_http,
+        ))
+    }
+}
+
+#[derive(Args)]
+struct AddArgs {
+    name: String,
+    #[command(flatten)]
+    binding: BindingArgs,
+    /// Replace NAME, value and bindings, if it already exists, without
+    /// asking first. To replace only the value, use `secret set`.
+    #[arg(long)]
+    force: bool,
+    /// Warn from `hush run` once the value is older than this (`90d`,
+    /// `12h`, `30m`). The clock starts when the value is set.
+    #[arg(long, value_name = "DURATION")]
+    max_age: Option<String>,
+    /// Work on this profile's entries instead of the unprofiled ones.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+}
+
+#[derive(Args)]
+struct SetArgs {
+    name: String,
+    /// Read one value from stdin instead of prompting. A single trailing
+    /// newline is removed; the rest, spaces included, is the value.
+    #[arg(long)]
+    stdin: bool,
+    /// Warn from `hush run` once the value is older than this (`90d`,
+    /// `12h`, `30m`), or `none` to clear a limit. Omit to leave it.
+    #[arg(long, value_name = "DURATION")]
+    max_age: Option<String>,
+    /// Keep redacting the previous value from responses for this long
+    /// (`7d`, `12h`). It is never sent. Without this, it is forgotten.
+    #[arg(long, value_name = "DURATION")]
+    keep_old: Option<String>,
+    /// Work on this profile's entries instead of the unprofiled ones.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -360,7 +378,11 @@ fn dispatch(cli: Cli) -> Result<ExitCode> {
             // Canonical, as the directories `hush profile use` maps are.
             let cwd = std::env::current_dir()?.canonicalize()?;
             let names = names::collect(&cwd, &vault::global_env_path()?, &secrets)?;
-            let reason = unlock_reason(&cmd);
+            let shown: Vec<String> = cmd
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let reason = unlock_reason(&shown);
             run::run(names, profile, &cwd, env, cmd, || run_vault(&reason))
         }
     }
@@ -534,6 +556,11 @@ fn cmd_app(_: AppAction) -> Result<ExitCode> {
     bail!("app launchers are macOS only")
 }
 
+/// The vault, opened to change it: the prompt, then the lock, then the load.
+fn edit_vault() -> Result<vault::VaultEdit> {
+    vault::VaultEdit::open(passphrase()?)
+}
+
 fn passphrase() -> Result<String> {
     if !vault::vault_exists()? {
         bail!("no vault found — run `hush init` first");
@@ -587,13 +614,11 @@ fn cmd_init() -> Result<ExitCode> {
 /// current one has opened it, so a typo there doesn't collect a replacement.
 fn cmd_passwd() -> Result<ExitCode> {
     eprintln!("changing the vault passphrase");
-    let old = passphrase()?;
-    let _lock = vault::lock_vault()?;
-    let vault = vault::load_vault(&old)?;
+    let edit = edit_vault()?;
     let new = read_secret("New passphrase: ", "HUSH_NEW_PASSPHRASE")?;
     let confirm = read_secret("Confirm passphrase: ", "HUSH_NEW_PASSPHRASE")?;
     check_new_passphrase(&new, &confirm)?;
-    vault::save_vault(&vault, &new)?;
+    edit.save_with(&new)?;
     println!("vault passphrase changed");
     // The vault is re-encrypted by now, so a keychain failure only warns.
     #[cfg(target_os = "macos")]
@@ -630,385 +655,386 @@ fn no_such_secret(name: &str, profile: Option<&str>) -> anyhow::Error {
 /// you're approving.
 fn cmd_secret(action: SecretAction) -> Result<ExitCode> {
     match action {
-        SecretAction::Add {
-            name,
-            host,
-            env,
-            header,
-            format,
-            allow_http,
-            force,
-            max_age,
-            profile,
-        } => {
-            let profile = profile_arg(profile.as_deref())?;
-            vault::check_host(&host)?;
-            let max_age_secs = match &max_age {
-                Some(text) => parse_max_age(text)?,
-                None => None,
-            };
-            let binding = Binding::new(host, env, header, format, allow_http);
-            let replacing = if force {
-                ", replacing it if it exists"
-            } else {
-                ""
-            };
-            eprintln!(
-                "adding {name}{}{replacing}, bound to {}",
-                in_profile(profile),
-                describe(&binding)
-            );
-            if max_age_secs.is_some() {
-                eprintln!(
-                    "hush run will warn once {name} is older than {}",
-                    max_age.as_deref().unwrap_or_default()
-                );
-            }
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            if let Some(p) = profile
-                && v.secrets.contains_key(&name)
-            {
-                eprintln!(
-                    "runs with profile {p} will use this {name} instead of the unprofiled one"
-                );
-            }
-            if let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name))
-                && !force
-            {
-                eprintln!("{name} already exists, bound to:");
-                for b in &existing.bindings {
-                    eprintln!("  {}", describe(b));
-                }
-                let replace = confirm("replace its value and bindings?").map_err(|e| {
-                    anyhow!("{name} already exists: {e}; pass --force to replace it")
-                })?;
-                if !replace {
-                    bail!("left {name} unchanged");
-                }
-            }
-            let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
-            v.secrets_in_or_new(profile).insert(
-                name,
-                vault::SecretEntry {
-                    value,
-                    bindings: vec![binding],
-                    rotated_at: Some(vault::now_unix()),
-                    max_age_secs,
-                    retired: Vec::new(),
-                },
-            );
-            vault::save_vault(&v, &pass)?;
-        }
-        SecretAction::Set {
-            name,
-            stdin,
-            max_age,
-            keep_old,
-            profile,
-        } => {
-            let profile = profile_arg(profile.as_deref())?;
-            // `None` means leave the stored limit alone; `Some(None)` clears it.
-            let max_age_secs = match &max_age {
-                Some(text) => Some(parse_max_age(text)?),
-                None => None,
-            };
-            // Before the passphrase, so a bad duration changes nothing and
-            // doesn't consume a value waiting on stdin.
-            let keep_for = match keep_old.as_deref() {
-                Some(text) => Some(vault::parse_duration(text)?),
-                None => None,
-            };
-            // Typed at a terminal, the value would echo, stay in the
-            // scrollback, and be readable by an agent sharing the terminal.
-            if stdin && std::io::stdin().is_terminal() {
-                bail!(
-                    "--stdin reads a piped value, and stdin is a terminal, where the value would echo; leave out --stdin to be prompted with the value hidden"
-                );
-            }
-            eprintln!(
-                "replacing the value of {name}{}, keeping its bindings",
-                in_profile(profile)
-            );
-            if let Some(text) = &max_age {
-                if text.eq_ignore_ascii_case("none") {
-                    eprintln!("clearing the max age of {name}");
-                } else {
-                    eprintln!("hush run will warn once {name} is older than {text}");
-                }
-            }
-            if let Some(text) = &keep_old {
-                eprintln!(
-                    "the previous value of {name} will be redacted from responses for {}, then dropped; it is never sent",
-                    text.trim()
-                );
-            }
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            // Copies made with `secret cp` keep the old value; say where.
-            let others: Vec<String> = {
-                let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name)) else {
-                    return Err(no_such_secret(&name, profile));
-                };
-                for b in &existing.bindings {
-                    eprintln!("  {}", describe(b));
-                }
-                v.others_with_value(&name, profile, &existing.value)
-                    .into_iter()
-                    .map(|(p, n)| format!("{n}{}", vault::place(p)))
-                    .collect()
-            };
-            let value = if stdin {
-                read_stdin_value()?
-            } else {
-                read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?
-            };
-            // An empty pipe, say from a password manager command that failed,
-            // would otherwise wipe the key.
-            if value.is_empty() {
-                bail!("the new value for {name} is empty; left it unchanged");
-            }
-            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
-                return Err(no_such_secret(&name, profile));
-            };
-            let changed = entry.value != value;
-            let now = vault::now_unix();
-            if let Some(secs) = keep_for {
-                entry.retire_current(&value, vault::until_unix(now, secs), now);
-            }
-            entry.value = value;
-            entry.rotated_at = Some(now);
-            if let Some(max_age_secs) = max_age_secs {
-                entry.max_age_secs = max_age_secs;
-            }
-            vault::save_vault(&v, &pass)?;
-            if changed {
-                for other in &others {
-                    eprintln!("{other} held the same value and still does; set it there too");
-                }
-            }
-        }
+        SecretAction::Add(args) => secret_add(args)?,
+        SecretAction::Set(args) => secret_set(args)?,
         SecretAction::Cp {
             name,
             from,
             to,
             force,
-        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, false)?,
+        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, Transfer::Copy)?,
         SecretAction::Mv {
             name,
             from,
             to,
             force,
-        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, true)?,
+        } => copy_or_move(&name, from.as_deref(), to.as_deref(), force, Transfer::Move)?,
         SecretAction::Unbind {
             name,
             host,
             env,
             profile,
-        } => {
-            let profile = profile_arg(profile.as_deref())?;
-            let env_for = env
-                .as_deref()
-                .map(|e| format!(" and env {e}"))
-                .unwrap_or_default();
-            eprintln!(
-                "removing the binding of {name}{} for host {host}{env_for}",
-                in_profile(profile)
-            );
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
-                bail!("no such secret: {name}{}", in_profile(profile))
-            };
-            entry
-                .remove_binding(&host, env.as_deref())
-                .map_err(|e| anyhow!("{name}: {e}"))?;
-            if entry.bindings.is_empty() {
-                eprintln!("{name} has no bindings left, so `hush run` will not inject it");
-            }
-            vault::save_vault(&v, &pass)?;
-        }
+        } => secret_unbind(&name, &host, env.as_deref(), profile.as_deref())?,
         SecretAction::Bind {
             name,
-            host,
-            env,
-            header,
-            format,
-            allow_http,
+            binding,
             profile,
-        } => {
-            let profile = profile_arg(profile.as_deref())?;
-            vault::check_host(&host)?;
-            let binding = Binding::new(host, env, header, format, allow_http);
-            eprintln!(
-                "binding {name}{} to {}",
-                in_profile(profile),
-                describe(&binding)
-            );
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
-                bail!("no such secret: {name}{}", in_profile(profile))
-            };
-            entry
-                .add_binding(binding)
-                .map_err(|e| anyhow!("{name} is {e}"))?;
-            vault::save_vault(&v, &pass)?;
-        }
-        SecretAction::Rm { name, profile } => {
-            let profile = profile_arg(profile.as_deref())?;
-            eprintln!("removing {name}{}", in_profile(profile));
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            if v.remove(&name, profile).is_none() {
-                bail!("no such secret: {name}{}", in_profile(profile));
-            }
-            warn_if_emptied(&v, profile);
-            vault::save_vault(&v, &pass)?;
-        }
-        SecretAction::Ls { profile } => {
-            let profile = profile_arg(profile.as_deref())?;
-            let v = vault::load_vault(&passphrase()?)?;
-            // (profile, name), unprofiled first.
-            let mut listed: Vec<(Option<&str>, &str)> = match profile {
-                Some(p) => {
-                    let Some(own) = v.secrets_in(Some(p)) else {
-                        bail!("no such profile: {p}");
-                    };
-                    let shared = v.secrets.keys().filter(|n| !own.contains_key(*n));
-                    shared
-                        .map(|n| (None, n.as_str()))
-                        .chain(own.keys().map(|n| (Some(p), n.as_str())))
-                        .collect()
-                }
-                None => v
-                    .secrets
-                    .keys()
-                    .map(|n| (None, n.as_str()))
-                    .chain(v.profiles.iter().flat_map(|(p, profile)| {
-                        profile
-                            .secrets
-                            .keys()
-                            .map(|n| (Some(p.as_str()), n.as_str()))
-                    }))
-                    .collect(),
-            };
-            listed.sort();
-            let now = vault::now_unix();
-            for (p, name) in listed {
-                match p {
-                    Some(p) => println!("{name} (profile {p})"),
-                    None => println!("{name}"),
-                }
-                let entry = &v.secrets_in(p).expect("listed from it")[name];
-                println!("  {}", entry.age_label(now));
-                if let Some(line) = entry.retired_label(now) {
-                    println!("  {line}");
-                }
-                for b in &entry.bindings {
-                    println!("  {}", describe(b));
-                }
-            }
-        }
+        } => secret_bind(&name, binding, profile.as_deref())?,
+        SecretAction::Rm { name, profile } => secret_rm(&name, profile.as_deref())?,
+        SecretAction::Ls { profile } => secret_ls(profile.as_deref())?,
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn secret_add(args: AddArgs) -> Result<()> {
+    let AddArgs {
+        name,
+        binding,
+        force,
+        max_age,
+        profile,
+    } = args;
+    let profile = profile_arg(profile.as_deref())?;
+    let binding = binding.into_binding()?;
+    let max_age_secs = match &max_age {
+        Some(text) => parse_max_age(text)?,
+        None => None,
+    };
+    let replacing = if force {
+        ", replacing it if it exists"
+    } else {
+        ""
+    };
+    eprintln!(
+        "adding {name}{}{replacing}, bound to {}",
+        in_profile(profile),
+        describe(&binding)
+    );
+    if max_age_secs.is_some() {
+        eprintln!(
+            "hush run will warn once {name} is older than {}",
+            max_age.as_deref().unwrap_or_default()
+        );
+    }
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    if let Some(p) = profile
+        && v.secrets.contains_key(&name)
+    {
+        eprintln!("runs with profile {p} will use this {name} instead of the unprofiled one");
+    }
+    if let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name))
+        && !force
+    {
+        eprintln!("{name} already exists, bound to:");
+        for b in &existing.bindings {
+            eprintln!("  {}", describe(b));
+        }
+        let replace = confirm("replace its value and bindings?")
+            .map_err(|e| anyhow!("{name} already exists: {e}; pass --force to replace it"))?;
+        if !replace {
+            bail!("left {name} unchanged");
+        }
+    }
+    let value = read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?;
+    v.secrets_in_or_new(profile).insert(
+        name,
+        vault::SecretEntry {
+            value,
+            bindings: vec![binding],
+            rotated_at: Some(vault::now_unix()),
+            max_age_secs,
+            retired: Vec::new(),
+        },
+    );
+    edit.save()?;
+    Ok(())
+}
+
+fn secret_set(args: SetArgs) -> Result<()> {
+    let SetArgs {
+        name,
+        stdin,
+        max_age,
+        keep_old,
+        profile,
+    } = args;
+    let profile = profile_arg(profile.as_deref())?;
+    // `None` means leave the stored limit alone; `Some(None)` clears it.
+    let max_age_secs = match &max_age {
+        Some(text) => Some(parse_max_age(text)?),
+        None => None,
+    };
+    // Before the passphrase, so a bad duration changes nothing and
+    // doesn't consume a value waiting on stdin.
+    let keep_for = match keep_old.as_deref() {
+        Some(text) => Some(vault::parse_duration(text)?),
+        None => None,
+    };
+    // Typed at a terminal, the value would echo, stay in the
+    // scrollback, and be readable by an agent sharing the terminal.
+    if stdin && std::io::stdin().is_terminal() {
+        bail!(
+            "--stdin reads a piped value, and stdin is a terminal, where the value would echo; leave out --stdin to be prompted with the value hidden"
+        );
+    }
+    eprintln!(
+        "replacing the value of {name}{}, keeping its bindings",
+        in_profile(profile)
+    );
+    if let Some(text) = &max_age {
+        if text.eq_ignore_ascii_case("none") {
+            eprintln!("clearing the max age of {name}");
+        } else {
+            eprintln!("hush run will warn once {name} is older than {text}");
+        }
+    }
+    if let Some(text) = &keep_old {
+        eprintln!(
+            "the previous value of {name} will be redacted from responses for {}, then dropped; it is never sent",
+            text.trim()
+        );
+    }
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    // Copies made with `secret cp` keep the old value; say where.
+    let others: Vec<String> = {
+        let Some(existing) = v.secrets_in(profile).and_then(|s| s.get(&name)) else {
+            return Err(no_such_secret(&name, profile));
+        };
+        for b in &existing.bindings {
+            eprintln!("  {}", describe(b));
+        }
+        v.others_with_value(&name, profile, &existing.value)
+            .into_iter()
+            .map(|(p, n)| format!("{n}{}", vault::place(p)))
+            .collect()
+    };
+    let value = if stdin {
+        read_stdin_value()?
+    } else {
+        read_secret(&format!("Value for {name}: "), "HUSH_SECRET_VALUE")?
+    };
+    // An empty pipe, say from a password manager command that failed,
+    // would otherwise wipe the key.
+    if value.is_empty() {
+        bail!("the new value for {name} is empty; left it unchanged");
+    }
+    let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(&name)) else {
+        return Err(no_such_secret(&name, profile));
+    };
+    let changed = entry.value != value;
+    entry.set_value(value, keep_for, vault::now_unix());
+    if let Some(max_age_secs) = max_age_secs {
+        entry.max_age_secs = max_age_secs;
+    }
+    edit.save()?;
+    if changed {
+        for other in &others {
+            eprintln!("{other} held the same value and still does; set it there too");
+        }
+    }
+    Ok(())
+}
+
+fn secret_unbind(name: &str, host: &str, env: Option<&str>, profile: Option<&str>) -> Result<()> {
+    let profile = profile_arg(profile)?;
+    let env_for = env.map(|e| format!(" and env {e}")).unwrap_or_default();
+    eprintln!(
+        "removing the binding of {name}{} for host {host}{env_for}",
+        in_profile(profile)
+    );
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(name)) else {
+        bail!("no such secret: {name}{}", in_profile(profile))
+    };
+    entry
+        .remove_binding(host, env)
+        .map_err(|e| anyhow!("{name}: {e}"))?;
+    if entry.bindings.is_empty() {
+        eprintln!("{name} has no bindings left, so `hush run` will not inject it");
+    }
+    edit.save()?;
+    Ok(())
+}
+
+fn secret_bind(name: &str, binding: BindingArgs, profile: Option<&str>) -> Result<()> {
+    let profile = profile_arg(profile)?;
+    let binding = binding.into_binding()?;
+    eprintln!(
+        "binding {name}{} to {}",
+        in_profile(profile),
+        describe(&binding)
+    );
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    let Some(entry) = v.secrets_in_mut(profile).and_then(|s| s.get_mut(name)) else {
+        bail!("no such secret: {name}{}", in_profile(profile))
+    };
+    entry
+        .add_binding(binding)
+        .map_err(|e| anyhow!("{name} is {e}"))?;
+    edit.save()?;
+    Ok(())
+}
+
+fn secret_rm(name: &str, profile: Option<&str>) -> Result<()> {
+    let profile = profile_arg(profile)?;
+    eprintln!("removing {name}{}", in_profile(profile));
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    if v.remove(name, profile).is_none() {
+        bail!("no such secret: {name}{}", in_profile(profile));
+    }
+    warn_if_emptied(v, profile);
+    edit.save()?;
+    Ok(())
+}
+
+fn secret_ls(profile: Option<&str>) -> Result<()> {
+    let profile = profile_arg(profile)?;
+    let v = vault::load_vault(&passphrase()?)?;
+    // (profile, name), unprofiled first.
+    let mut listed: Vec<(Option<&str>, &str)> = match profile {
+        Some(p) => {
+            let Some(own) = v.secrets_in(Some(p)) else {
+                bail!("no such profile: {p}");
+            };
+            let shared = v.secrets.keys().filter(|n| !own.contains_key(*n));
+            shared
+                .map(|n| (None, n.as_str()))
+                .chain(own.keys().map(|n| (Some(p), n.as_str())))
+                .collect()
+        }
+        None => v
+            .secrets
+            .keys()
+            .map(|n| (None, n.as_str()))
+            .chain(v.profiles.iter().flat_map(|(p, profile)| {
+                profile
+                    .secrets
+                    .keys()
+                    .map(|n| (Some(p.as_str()), n.as_str()))
+            }))
+            .collect(),
+    };
+    listed.sort();
+    let now = vault::now_unix();
+    for (p, name) in listed {
+        match p {
+            Some(p) => println!("{name} (profile {p})"),
+            None => println!("{name}"),
+        }
+        let entry = &v.secrets_in(p).expect("listed from it")[name];
+        println!("  {}", entry.age_label(now));
+        if let Some(line) = entry.retired_label(now) {
+            println!("  {line}");
+        }
+        for b in &entry.bindings {
+            println!("  {}", describe(b));
+        }
+    }
+    Ok(())
 }
 
 fn cmd_profile(action: ProfileAction) -> Result<ExitCode> {
     match action {
         ProfileAction::Use { name, none, dir } => {
-            let name = profile_arg(name.as_deref())?;
-            let dir = mapped_dir(dir.as_deref(), none)?;
-            match name {
-                Some(p) => eprintln!("mapping {dir} to profile {p}"),
-                None => eprintln!("removing the profile mapping of {dir}"),
-            }
-            let pass = passphrase()?;
-            let _lock = vault::lock_vault()?;
-            let mut v = vault::load_vault(&pass)?;
-            match name {
-                Some(p) => {
-                    if !v.profiles.contains_key(p) {
-                        bail!(
-                            "no such profile: {p}; add a secret to it first with `hush secret add NAME --host HOST --profile {p}`"
-                        );
-                    }
-                    // Where the project was before it moved, perhaps. Not
-                    // removed here: a directory on an unmounted volume looks
-                    // just the same.
-                    for (d, _) in v
-                        .directories
-                        .iter()
-                        .filter(|(d, q)| *q == p && **d != dir && !Path::new(d).exists())
-                    {
-                        eprintln!(
-                            "{d}, also mapped to {p}, no longer exists; if it's gone for good, `hush profile use --none --dir {d}`"
-                        );
-                    }
-                    match v.directories.insert(dir.clone(), p.to_string()) {
-                        Some(old) if old == p => {
-                            eprintln!("{dir} was already mapped to profile {p}");
-                            return Ok(ExitCode::SUCCESS);
-                        }
-                        Some(old) => eprintln!("it was mapped to profile {old}"),
-                        None => {}
-                    }
-                }
-                None => {
-                    if v.directories.remove(&dir).is_none() {
-                        match v.mapped_profile(Path::new(&dir)) {
-                            Some((above, p)) => bail!(
-                                "no profile is mapped to {dir} itself; runs there use profile {p}, mapped to {above}"
-                            ),
-                            None => bail!("no profile is mapped to {dir}"),
-                        }
-                    }
-                }
-            }
-            vault::save_vault(&v, &pass)?;
+            profile_use(name.as_deref(), none, dir.as_deref())?;
         }
-        ProfileAction::Ls => {
-            let v = vault::load_vault(&passphrase()?)?;
-            let mut names: Vec<&str> = v
-                .profiles
-                .keys()
-                .chain(v.directories.values())
-                .map(String::as_str)
-                .collect();
-            names.sort();
-            names.dedup();
-            if names.is_empty() {
-                eprintln!(
-                    "no profiles; add a secret to one with `hush secret add NAME --host HOST --profile PROFILE`"
+        ProfileAction::Ls => profile_ls()?,
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn profile_use(name: Option<&str>, none: bool, dir: Option<&Path>) -> Result<()> {
+    let name = profile_arg(name)?;
+    let dir = mapped_dir(dir, none)?;
+    match name {
+        Some(p) => eprintln!("mapping {dir} to profile {p}"),
+        None => eprintln!("removing the profile mapping of {dir}"),
+    }
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
+    match name {
+        Some(p) => {
+            if !v.profiles.contains_key(p) {
+                bail!(
+                    "no such profile: {p}; add a secret to it first with `hush secret add NAME --host HOST --profile {p}`"
                 );
             }
-            for p in names {
-                match v.profiles.get(p).map(|p| p.secrets.len()) {
-                    Some(1) => println!("{p}: 1 entry"),
-                    Some(n) => println!("{p}: {n} entries"),
-                    None => println!("{p}: not in the vault, runs use the unprofiled entries"),
+            // Where the project was before it moved, perhaps. Not
+            // removed here: a directory on an unmounted volume looks
+            // just the same.
+            for (d, _) in v
+                .directories
+                .iter()
+                .filter(|(d, q)| *q == p && **d != dir && !Path::new(d).exists())
+            {
+                eprintln!(
+                    "{d}, also mapped to {p}, no longer exists; if it's gone for good, `hush profile use --none --dir {d}`"
+                );
+            }
+            match v.directories.insert(dir.clone(), p.to_string()) {
+                Some(old) if old == p => {
+                    eprintln!("{dir} was already mapped to profile {p}");
+                    return Ok(());
                 }
-                for dir in v
-                    .directories
-                    .iter()
-                    .filter(|(_, q)| *q == p)
-                    .map(|(d, _)| d)
-                {
-                    if Path::new(dir).exists() {
-                        println!("  {dir}");
-                    } else {
-                        println!("  {dir} (no longer exists)");
-                    }
+                Some(old) => eprintln!("it was mapped to profile {old}"),
+                None => {}
+            }
+        }
+        None => {
+            if v.directories.remove(&dir).is_none() {
+                match v.mapped_profile(Path::new(&dir)) {
+                    Some((above, p)) => bail!(
+                        "no profile is mapped to {dir} itself; runs there use profile {p}, mapped to {above}"
+                    ),
+                    None => bail!("no profile is mapped to {dir}"),
                 }
             }
         }
     }
-    Ok(ExitCode::SUCCESS)
+    edit.save()?;
+    Ok(())
+}
+
+fn profile_ls() -> Result<()> {
+    let v = vault::load_vault(&passphrase()?)?;
+    let mut names: Vec<&str> = v
+        .profiles
+        .keys()
+        .chain(v.directories.values())
+        .map(String::as_str)
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        eprintln!(
+            "no profiles; add a secret to one with `hush secret add NAME --host HOST --profile PROFILE`"
+        );
+    }
+    for p in names {
+        match v.profiles.get(p).map(|p| p.secrets.len()) {
+            Some(1) => println!("{p}: 1 entry"),
+            Some(n) => println!("{p}: {n} entries"),
+            None => println!("{p}: not in the vault, runs use the unprofiled entries"),
+        }
+        for dir in v
+            .directories
+            .iter()
+            .filter(|(_, q)| *q == p)
+            .map(|(d, _)| d)
+        {
+            if Path::new(dir).exists() {
+                println!("  {dir}");
+            } else {
+                println!("  {dir} (no longer exists)");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The directory `profile use` maps: `--dir`, or else the current project.
@@ -1063,19 +1089,29 @@ fn canonical_gone(path: &Path) -> PathBuf {
     }
 }
 
-/// `secret cp`, or with `remove_source`, `secret mv`. The whole entry goes,
-/// bindings included, since a profile's entry replaces the unprofiled one
-/// whole.
+/// Whether `secret cp` or `secret mv` is running.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Transfer {
+    Copy,
+    Move,
+}
+
+/// `secret cp` and `secret mv`. The whole entry goes, bindings included, since
+/// a profile's entry replaces the unprofiled one whole.
 fn copy_or_move(
     name: &str,
     from: Option<&str>,
     to: Option<&str>,
     force: bool,
-    remove_source: bool,
+    transfer: Transfer,
 ) -> Result<()> {
     let from = profile_arg(from)?;
     let to = profile_arg(to)?;
-    let verb = if remove_source { "moving" } else { "copying" };
+    let verb = if transfer == Transfer::Move {
+        "moving"
+    } else {
+        "copying"
+    };
     let replacing = if force {
         ", replacing it there if it exists"
     } else {
@@ -1086,9 +1122,8 @@ fn copy_or_move(
         vault::place(from),
         vault::place(to)
     );
-    let pass = passphrase()?;
-    let _lock = vault::lock_vault()?;
-    let mut v = vault::load_vault(&pass)?;
+    let mut edit = edit_vault()?;
+    let v = &mut edit.vault;
     if let Some(entry) = v.secrets_in(from).and_then(|s| s.get(name)) {
         for b in &entry.bindings {
             eprintln!("  {}", describe(b));
@@ -1115,9 +1150,9 @@ fn copy_or_move(
             eprintln!("that value is dropped, not retired, so hush stops redacting it");
         }
     }
-    if remove_source {
+    if transfer == Transfer::Move {
         v.move_entry(name, from, to, force)?;
-        warn_if_emptied(&v, from);
+        warn_if_emptied(v, from);
     } else {
         v.copy_entry(name, from, to, force)?;
         eprintln!("the copy is separate: after `hush secret set`, set it in both places");
@@ -1127,7 +1162,7 @@ fn copy_or_move(
     {
         eprintln!("runs with profile {p} will use this {name} instead of the unprofiled one");
     }
-    vault::save_vault(&v, &pass)?;
+    edit.save()?;
     Ok(())
 }
 
