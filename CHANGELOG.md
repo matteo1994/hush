@@ -4,6 +4,10 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.1.32 (2026-11-05)
+
+- Save the vault durably, redact Debug output, and keep the proxy accepting (#58)
+
 ## 0.1.31 (2026-11-04)
 
 - Open an app under hush from the Dock or Spotlight with `hush app add`. (#57)
