@@ -301,6 +301,11 @@ enum AppAction {
         /// An app's name in /Applications or ~/Applications, or the path of
         /// its bundle.
         app: String,
+        /// Call it `APP (LABEL)` instead, so one app can have several
+        /// launchers, each with its own secrets or --profile and, for an
+        /// Electron app, a profile directory of its own.
+        #[arg(long, value_name = "LABEL")]
+        name: Option<String>,
         /// Hand this secret to the app, on top of
         /// ~/.config/hush/global.env. Repeatable.
         #[arg(long = "secret", value_name = "NAME")]
@@ -311,7 +316,8 @@ enum AppAction {
         profile: Option<String>,
         #[arg(long)]
         env: Option<String>,
-        /// Replace this app's launcher if there is one already.
+        /// Replace the launcher of that name if there is one already. Names
+        /// that differ only in case are usually the same launcher.
         #[arg(long)]
         force: bool,
         /// Arguments for the app, such as `--user-data-dir DIR`.
@@ -516,6 +522,7 @@ fn cmd_app(action: AppAction) -> Result<ExitCode> {
     match action {
         AppAction::Add {
             app,
+            name,
             secrets,
             profile,
             env,
@@ -530,7 +537,7 @@ fn cmd_app(action: AppAction) -> Result<ExitCode> {
                 args: &args,
             };
             let home = PathBuf::from(std::env::var_os("HOME").context("HOME isn't set")?);
-            let dest = launcher::add(&app, &run, force, &home)?;
+            let dest = launcher::add(&app, name.as_deref(), &run, force, &home)?;
             eprintln!(
                 "wrote {}; open it from Spotlight or keep it in the Dock",
                 dest.display()
