@@ -8,7 +8,18 @@
 
 An agent that has your key in `.env` or its environment can read it, and anything it reads can end up in its transcript, in a log, or, through a prompt injection, in a request to an attacker. hush runs the agent with a placeholder instead, and swaps in the real key on the wire, only for requests to the host you allowed. Your code and tools don't change.
 
-This page is the short version. The [full README](https://github.com/matteo1994/hush#readme) on GitHub covers the design, every command and the threat model.
+## Quick start
+
+Once hush is installed (see *Install* below):
+
+```bash
+hush init                                                # create the vault, set its passphrase
+hush secret add STRIPE_SECRET_KEY --host api.stripe.com  # prompts for the value, hidden
+echo 'STRIPE_SECRET_KEY=' >> .env                        # names it for this project, no value
+hush run -- claude                                       # the agent sees hush_ph_…; api.stripe.com gets the key
+```
+
+[What it looks like](https://github.com/matteo1994/hush#what-it-looks-like) shows a run against an echo service, and [Common setups](https://github.com/matteo1994/hush#common-setups) covers per-project keys, dev servers, VS Code and MCP servers.
 
 ## How it works
 
@@ -38,18 +49,9 @@ sudo codesign -f -s - -o runtime /opt/hush/bin/hush
 
 Why both matter: [Installing](https://github.com/matteo1994/hush#installing).
 
-## Quick start
-
-```bash
-hush init                                                # create the vault, set its passphrase
-hush secret add STRIPE_SECRET_KEY --host api.stripe.com  # prompts for the value, hidden
-echo 'STRIPE_SECRET_KEY=' >> .env                        # names it for this project, no value
-hush run -- claude                                       # the agent sees hush_ph_…; api.stripe.com gets the key
-```
-
-[What it looks like](https://github.com/matteo1994/hush#what-it-looks-like) shows a run against an echo service, and [Common setups](https://github.com/matteo1994/hush#common-setups) covers per-project keys, dev servers, VS Code and MCP servers.
-
 ## More in the README
+
+This page is the short version. The [full README](https://github.com/matteo1994/hush#readme) on GitHub covers the design, every command and the threat model.
 
 - [Which secrets a command gets](https://github.com/matteo1994/hush#which-secrets-get-exposed-to-a-given-command) and [profiles](https://github.com/matteo1994/hush#profiles-the-same-name-a-different-key-per-project): a different key under the same name per project
 - [Rotating a key](https://github.com/matteo1994/hush#rotating-a-key)
