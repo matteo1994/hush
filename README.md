@@ -20,7 +20,14 @@ hush runs the agent with a **placeholder** instead of each key. A small proxy in
 
 ## What it looks like
 
-A key bound to `postman-echo.com`, a service that echoes back the headers it receives, and the agent's view of it under `hush run`:
+A key bound to `postman-echo.com`, a service that echoes back the headers it receives, sent in an `X-Api-Key` header:
+
+```bash
+hush secret add DEMO_API_KEY --host postman-echo.com --header x-api-key --format '{value}'
+hush run --secret DEMO_API_KEY -- sh
+```
+
+and the view from inside that run:
 
 ```console
 $ echo $DEMO_API_KEY
@@ -33,7 +40,7 @@ $ curl -s https://httpbin.org/headers -H "X-Api-Key: $DEMO_API_KEY" | grep -i ap
     "X-Api-Key": "hush_ph_947f4e21617d32f7f2cef6818349efd5"
 ```
 
-postman-echo, the bound host, got the real key, and when it echoed it back, hush blanked it out of the response before the agent saw it. httpbin, any other host, got the placeholder.
+postman-echo, the bound host, got the real key, and when it echoed it back, hush blanked it out of the response before the agent saw it. httpbin, any other host, got the placeholder. Try it with a throwaway value: hush really does send the key to the bound host.
 
 ## Quick start
 
