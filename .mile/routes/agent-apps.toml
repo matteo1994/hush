@@ -50,8 +50,9 @@ completed_at = "2026-11-02T01:07:52.330160Z"
 id = "start-a-separate-app-instance-with-its-own-profile-directory-under-hush-run"
 title = "Start a separate app instance with its own profile directory under hush run"
 notes = "A single-instance app that's already running receives a new launch and keeps its old environment. VS Code and Electron apps accept --user-data-dir, which starts a separate instance with hush's env; prefer that, and refuse only when the app has no such option."
-status = "todo"
+status = "done"
 created_at = "2026-10-25T22:40:44.592652Z"
+completed_at = "2026-11-07T03:11:41.982286Z"
 
 [[stones.steps]]
 id = "sign-the-macos-binary-ad-hoc-with-the-hardened-runtime"
@@ -67,6 +68,13 @@ title = "One Touch ID prompt covers MCP servers started together"
 notes = "Claude desktop starts every configured MCP server at launch; with three wrapped in hush run, each would ask for Touch ID. Options: reuse an LAContext approval for a short window (LAContext touchIDAuthenticationAllowableReuseDuration is per context, so it doesn't carry across processes), or a short-lived unlock shared by runs started within seconds of each other. Must not give a later, unrelated hush run a silent unlock. Seen 2026-10-26: Claude desktop (3.6556.2) starts each configured server twice (two hush run processes, via its 'disclaimer' helper), so even one wrapped server asks for Touch ID twice per app launch."
 status = "todo"
 created_at = "2026-10-25T23:31:02.712649Z"
+
+[[stones.steps]]
+id = "several-launchers-for-one-app-each-with-its-own-name-and-key-set"
+title = "Several launchers for one app, each with its own name and key set"
+notes = "hush app add --name LABEL writes 'APP (LABEL).app' with its own --user-data-dir, so e.g. VS Code with profile keys-a and VS Code with keys-b run side by side. Today there is one launcher per app, and every window of an instance shares one environment, so one key set per instance."
+status = "todo"
+created_at = "2026-11-07T03:31:37.824464Z"
 
 [[stones]]
 id = "trust"

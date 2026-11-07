@@ -10,7 +10,7 @@
 //! in a log and shows hush's own lines in an alert when the run fails.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -66,6 +66,12 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
         }
     }
 
+    let args = with_own_profile(&bundle, &name, run.args, home)?;
+    let run = &RunArgs {
+        args: &args,
+        ..*run
+    };
+
     // Built beside the destination, so a failure leaves any old one in place.
     let tmp = folder.join(format!(".{name} (hush).app.tmp"));
     let _ = fs::remove_dir_all(&tmp);
@@ -77,6 +83,45 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     }
     written.with_context(|| format!("writing {}", dest.display()))?;
     Ok(dest)
+}
+
+/// `args`, with a `--user-data-dir` in front for an Electron app they name
+/// none for. Such an app hands a second launch with the same directory to
+/// the instance already running, which has none of the run's placeholders
+/// or proxy, so a launcher's app gets a directory of its own and runs beside
+/// the usual one. Another app may not know the option.
+fn with_own_profile(
+    bundle: &Path,
+    name: &str,
+    args: &[String],
+    home: &Path,
+) -> Result<Vec<String>> {
+    if app::user_data_dir(args).is_some() || !app::is_electron(bundle) {
+        return Ok(args.to_vec());
+    }
+    let dir = home.join("Library/Application Support/hush").join(name);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    // `mode` only covers what this call created; the directory holds the
+    // instance's sign-ins, and either may be left from before.
+    for path in [dir.as_path(), dir.parent().unwrap_or(&dir)] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
+    eprintln!(
+        "{name} gets a profile directory of its own, {}, so it runs beside your usual {name}; \
+         its settings and sign-ins start empty there (pass --user-data-dir after -- for another)",
+        dir.display()
+    );
+    let mut own = vec![
+        "--user-data-dir".to_string(),
+        dir.to_string_lossy().into_owned(),
+    ];
+    own.extend_from_slice(args);
+    Ok(own)
 }
 
 /// Whether `bundle` is one `add` wrote.

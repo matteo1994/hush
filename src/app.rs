@@ -46,13 +46,19 @@ fn app_of(exe: &Path) -> Option<PathBuf> {
     (exe.parent()? == bundle.join("Contents/MacOS")).then_some(bundle)
 }
 
-/// The bundle `path` is in, when that is an Electron app.
-fn electron_bundle_of(path: &Path) -> Option<PathBuf> {
-    let bundle = bundle_of(path)?;
+/// Whether `bundle` is an Electron app, which runs one instance per
+/// `--user-data-dir`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn is_electron(bundle: &Path) -> bool {
     bundle
         .join("Contents/Frameworks/Electron Framework.framework")
         .is_dir()
-        .then_some(bundle)
+}
+
+/// The bundle `path` is in, when that is an Electron app.
+fn electron_bundle_of(path: &Path) -> Option<PathBuf> {
+    let bundle = bundle_of(path)?;
+    is_electron(&bundle).then_some(bundle)
 }
 
 /// The app a launcher script in its bundle starts, such as VS Code's `code`
