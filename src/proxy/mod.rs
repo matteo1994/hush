@@ -20,7 +20,7 @@ mod scrub;
 pub mod fuzzing;
 
 use http::{
-    Head, connection_has, copy_body, header_value, parse_head, read_head, request_framing,
+    Head, Header, connection_has, copy_body, header_value, parse_head, read_head, request_framing,
     resolve_target, split_host_port,
 };
 use relay::{Scrubbed, relay_response};
@@ -154,7 +154,8 @@ fn handle_connection(client: TcpStream, table: &PlaceholderTable, mitm: &Mitm) -
         return handle_connect(client.into_inner(), leftover, &host, port, table, mitm);
     }
 
-    let (host, port, path) = resolve_target(&req.path, header_value(&req.headers, "host"))?;
+    let (host, port, path) =
+        resolve_target(&req.path, header_value(&req.headers, "host").as_deref())?;
     req.path = path;
     let upstream = TcpStream::connect((host.as_str(), port))?;
     upstream.set_read_timeout(Some(UPSTREAM_TIMEOUT))?;
@@ -352,7 +353,7 @@ fn forward<C: Read + Write, U: Read + Write>(
         }
     };
     let expects_continue = req.headers.iter().any(|(k, v)| {
-        k.eq_ignore_ascii_case("expect") && v.trim().eq_ignore_ascii_case("100-continue")
+        k.eq_ignore_ascii_case("expect") && v.trim_ascii().eq_ignore_ascii_case(b"100-continue")
     });
     let keep_alive =
         reuse == Reuse::KeepAlive && req.version == 1 && !connection_has(&req.headers, "close");
@@ -363,13 +364,13 @@ fn forward<C: Read + Write, U: Read + Write>(
     }
     headers.retain(|(k, _)| !HOP_BY_HOP.iter().any(|h| k.eq_ignore_ascii_case(h)));
     if !keep_alive {
-        headers.push(("Connection".to_string(), "close".to_string()));
+        headers.push(("Connection".to_string(), b"close".to_vec()));
     }
     let scrubber = if is_bound(table, target) {
         // A missing Accept-Encoding means any coding is acceptable, so ask for
         // `identity` explicitly: a compressed response can't be scanned.
         headers.retain(|(k, _)| !k.eq_ignore_ascii_case("accept-encoding"));
-        headers.push(("Accept-Encoding".to_string(), "identity".to_string()));
+        headers.push(("Accept-Encoding".to_string(), b"identity".to_vec()));
         Scrubber::new(real_values(table))
     } else {
         Scrubber::new(Vec::new())
@@ -378,7 +379,9 @@ fn forward<C: Read + Write, U: Read + Write>(
     let mut out = Vec::new();
     write!(out, "{} {} HTTP/1.1\r\n", req.method, req.path)?;
     for (k, v) in &headers {
-        write!(out, "{k}: {v}\r\n")?;
+        write!(out, "{k}: ")?;
+        out.extend_from_slice(v);
+        out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"\r\n");
     upstream.get_mut().write_all(&out)?;
@@ -418,8 +421,9 @@ const HOP_BY_HOP: &[&str] = &[
 /// server shared between sites, such as a CDN, routes on these, so a request
 /// that names another site would carry the real value to that site's origin.
 /// Such a request is forwarded as it came, placeholder included. Ports are
-/// not compared, as for bindings.
-fn names_only(headers: &[(String, String)], path: &str, target_host: &str) -> bool {
+/// not compared, as for bindings. A `Host` value that isn't UTF-8 names no
+/// host this can compare, so it fails.
+fn names_only(headers: &[Header], path: &str, target_host: &str) -> bool {
     let is_target = |authority: &str| {
         split_host_port(authority.trim(), 0)
             .0
@@ -428,9 +432,9 @@ fn names_only(headers: &[(String, String)], path: &str, target_host: &str) -> bo
     let mut hosts = headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| std::str::from_utf8(v))
         .peekable();
-    if hosts.peek().is_none() || !hosts.all(is_target) {
+    if hosts.peek().is_none() || !hosts.all(|v| v.is_ok_and(is_target)) {
         return false;
     }
     if path.starts_with('/') || path == "*" {
@@ -513,11 +517,7 @@ impl Target<'_> {
 /// value for bindings that opted in with `allow_http`, and a loopback one only
 /// for bindings that name the address and port connected to; otherwise the
 /// placeholder goes out verbatim, as for any other non-matching request.
-fn substitute_placeholders(
-    headers: &mut [(String, String)],
-    target: &Target,
-    table: &PlaceholderTable,
-) {
+fn substitute_placeholders(headers: &mut [Header], target: &Target, table: &PlaceholderTable) {
     for (name, value) in headers.iter_mut() {
         let mut replacement: Option<String> = None;
         for (placeholder, entry) in table.iter() {
@@ -525,13 +525,13 @@ fn substitute_placeholders(
                 continue;
             }
             let expected = entry.format.replace("{value}", placeholder);
-            if *value == expected {
+            if *value == expected.as_bytes() {
                 replacement = Some(entry.format.replace("{value}", &entry.real_value));
                 break;
             }
         }
         if let Some(new_value) = replacement {
-            *value = new_value;
+            *value = new_value.into_bytes();
         }
     }
 }
@@ -567,8 +567,11 @@ mod tests {
         HashMap::from([(PLACEHOLDER.to_string(), entry)])
     }
 
-    fn auth_headers() -> Vec<(String, String)> {
-        vec![("authorization".to_string(), format!("Bearer {PLACEHOLDER}"))]
+    fn auth_headers() -> Vec<Header> {
+        vec![(
+            "authorization".to_string(),
+            format!("Bearer {PLACEHOLDER}").into_bytes(),
+        )]
     }
 
     /// A target over TLS on another machine, as most are.
@@ -582,10 +585,10 @@ mod tests {
         }
     }
 
-    fn swapped(table: &PlaceholderTable, target: &Target, headers: &[(String, String)]) -> String {
+    fn swapped(table: &PlaceholderTable, target: &Target, headers: &[Header]) -> String {
         let mut h = headers.to_vec();
         substitute_placeholders(&mut h, target, table);
-        h[0].1.clone()
+        String::from_utf8(h[0].1.clone()).unwrap()
     }
 
     #[test]
@@ -606,13 +609,19 @@ mod tests {
         let table = table_bound_to("api.example.com");
         let target = remote("api.example.com");
 
-        let h = vec![("X-Api-Key".to_string(), format!("Bearer {PLACEHOLDER}"))];
+        let h = vec![(
+            "X-Api-Key".to_string(),
+            format!("Bearer {PLACEHOLDER}").into_bytes(),
+        )];
         assert_eq!(
             swapped(&table, &target, &h),
             format!("Bearer {PLACEHOLDER}")
         );
 
-        let h = vec![("Authorization".to_string(), format!("Token {PLACEHOLDER}"))];
+        let h = vec![(
+            "Authorization".to_string(),
+            format!("Token {PLACEHOLDER}").into_bytes(),
+        )];
         assert_eq!(swapped(&table, &target, &h), format!("Token {PLACEHOLDER}"));
     }
 
@@ -858,7 +867,7 @@ mod tests {
             ("/v1", "api.example.com:80:80", ph.as_str()),
             ("/v1", "api.example.com@evil.com", ph.as_str()),
         ] {
-            let mut headers = vec![("Host".to_string(), host_header.to_string())];
+            let mut headers = vec![("Host".to_string(), host_header.as_bytes().to_vec())];
             headers.extend(auth_headers());
             // As `handle_connection` and `forward` do.
             let (host, port, path) = resolve_target(request_target, Some(host_header)).unwrap();
@@ -871,7 +880,8 @@ mod tests {
                 substitute_placeholders(&mut headers, &target, &table);
             }
             assert_eq!(
-                headers[1].1, expected,
+                headers[1].1,
+                expected.as_bytes(),
                 "target={request_target} host={host_header}"
             );
         }
@@ -885,9 +895,9 @@ mod tests {
         assert_eq!(sent, "Bearer REAL");
 
         // The child sending the old bytes itself is not hush injecting them.
-        let mut headers = vec![("authorization".into(), "Bearer OLD-SECRET".into())];
+        let mut headers = vec![("authorization".into(), b"Bearer OLD-SECRET".to_vec())];
         substitute_placeholders(&mut headers, &remote("api.example.com"), &table);
-        assert_eq!(headers[0].1, "Bearer OLD-SECRET");
+        assert_eq!(headers[0].1, b"Bearer OLD-SECRET");
 
         // Redacted like a live value, encoded forms included.
         let values = real_values(&table);
@@ -940,10 +950,10 @@ mod tests {
 
     #[test]
     fn names_only_checks_every_host_header_and_an_absolute_target() {
-        let h = |values: &[&str]| -> Vec<(String, String)> {
+        let h = |values: &[&str]| -> Vec<Header> {
             values
                 .iter()
-                .map(|v| ("Host".to_string(), v.to_string()))
+                .map(|v| ("Host".to_string(), v.as_bytes().to_vec()))
                 .collect()
         };
         let api = "api.example.com";
@@ -971,6 +981,10 @@ mod tests {
             api
         ));
         assert!(!names_only(&h(&[api]), "evil.example.com/v1", api));
+
+        // Read lossily, as for the target, this would match the target.
+        let not_utf8 = vec![("Host".to_string(), b"api\xff.com".to_vec())];
+        assert!(!names_only(&not_utf8, "/v1", "api\u{fffd}.com"));
     }
 
     /// A one-shot upstream for `localhost`, plain or TLS. It answers a single
@@ -1661,8 +1675,8 @@ mod tests {
                 return;
             };
             let req = parse_head(&head).unwrap();
-            let auth = header_value(&req.headers, "authorization").unwrap_or("");
-            for piece in response.replace("{auth}", auth).as_bytes().chunks(7) {
+            let auth = header_value(&req.headers, "authorization").unwrap_or_default();
+            for piece in response.replace("{auth}", &auth).as_bytes().chunks(7) {
                 if s.write_all(piece).is_err() {
                     return;
                 }
@@ -1763,6 +1777,41 @@ mod tests {
 
         let seen = received(&dev_server).unwrap();
         assert!(seen.contains("Authorization: Bearer REAL\r\n"), "{seen}");
+    }
+
+    /// A header value may hold bytes above 0x7F (obs-text, RFC 9110 5.5),
+    /// such as a Latin-1 file name. The proxy rebuilds the request head, and
+    /// must not replace them while doing so.
+    #[test]
+    fn header_bytes_that_arent_utf8_reach_the_upstream_unchanged() {
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let head = thread::spawn(move || {
+            let (mut tcp, _) = upstream.accept().unwrap();
+            let head = read_head(&mut BufReader::new(&tcp)).unwrap().unwrap();
+            tcp.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            head
+        });
+        let (proxy, _mitm) = start(table_bound_to(&format!("127.0.0.1:{port}")), &[]);
+
+        let mut request = format!(
+            "GET http://localhost:{port}/v1 HTTP/1.1\r\nHost: localhost:{port}\r\n\
+             Authorization: Bearer {PLACEHOLDER}\r\nX-File: caf"
+        )
+        .into_bytes();
+        request.extend_from_slice(b"\xe9.txt\r\n\r\n");
+        let mut tcp = TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+        tcp.write_all(&request).unwrap();
+        let mut resp = Vec::new();
+        let _ = copy_until_close(&mut tcp, &mut resp);
+        assert!(resp.starts_with(b"HTTP/1.1 204"), "{resp:?}");
+
+        let head = head.join().unwrap();
+        let has = |line: &[u8]| head.windows(line.len()).any(|w| w == line);
+        let shown = head.escape_ascii();
+        assert!(has(b"\r\nX-File: caf\xe9.txt\r\n"), "{shown}");
+        assert!(has(b"\r\nAuthorization: Bearer REAL\r\n"), "{shown}");
     }
 
     #[test]

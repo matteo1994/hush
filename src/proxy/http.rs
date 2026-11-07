@@ -1,6 +1,7 @@
 //! The HTTP/1 the proxy needs: reading heads, finding where a message ends,
 //! and copying its body.
 
+use std::borrow::Cow;
 use std::io::{self, BufRead, Read, Write};
 
 use anyhow::{Context, Result, bail};
@@ -13,18 +14,23 @@ const MAX_REQUEST_HEADERS: usize = 64;
 /// Most headers a response may have; more is an unreadable head.
 const MAX_RESPONSE_HEADERS: usize = 128;
 
+/// A header as it came. The name is a token, so ASCII; the value may hold any
+/// byte but CR and LF (obs-text, RFC 9110 5.5), so it stays bytes, and text
+/// is read from it only to decide something (`header_value`).
+pub(super) type Header = (String, Vec<u8>);
+
 pub(super) struct Head {
     pub(super) method: String,
     pub(super) path: String,
     /// The minor version: 1 for HTTP/1.1.
     pub(super) version: u8,
-    pub(super) headers: Vec<(String, String)>,
+    pub(super) headers: Vec<Header>,
 }
 
 pub(super) struct ResponseHead {
     pub(super) version: u8,
     pub(super) status: u16,
-    pub(super) headers: Vec<(String, String)>,
+    pub(super) headers: Vec<Header>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,13 +48,17 @@ pub(super) enum Body {
 /// both `Transfer-Encoding` and `Content-Length`, `chunked` that isn't the
 /// final coding or appears twice, and lengths that disagree or aren't plain
 /// digits.
-pub(super) fn request_framing(headers: &[(String, String)]) -> Result<Body> {
+pub(super) fn request_framing(headers: &[Header]) -> Result<Body> {
     let values = |name: &str| -> Vec<String> {
         headers
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case(name))
-            .flat_map(|(_, v)| v.split(','))
-            .map(|v| v.trim().to_ascii_lowercase())
+            .flat_map(|(_, v)| {
+                String::from_utf8_lossy(v)
+                    .split(',')
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
             .collect()
     };
     let codings = values("transfer-encoding");
@@ -78,7 +88,7 @@ pub(super) fn request_framing(headers: &[(String, String)]) -> Result<Body> {
     ))
 }
 
-pub(super) fn body_framing(headers: &[(String, String)]) -> Result<Body> {
+pub(super) fn body_framing(headers: &[Header]) -> Result<Body> {
     if let Some(te) = header_value(headers, "transfer-encoding")
         && te.to_ascii_lowercase().contains("chunked")
     {
@@ -109,12 +119,15 @@ pub(super) fn response_framing(method: &str, resp: &ResponseHead) -> Body {
 }
 
 /// Whether a `Connection` header lists `token`.
-pub(super) fn connection_has(headers: &[(String, String)], token: &str) -> bool {
+pub(super) fn connection_has(headers: &[Header], token: &str) -> bool {
     headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("connection"))
-        .flat_map(|(_, v)| v.split(','))
-        .any(|t| t.trim().eq_ignore_ascii_case(token))
+        .any(|(_, v)| {
+            String::from_utf8_lossy(v)
+                .split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case(token))
+        })
 }
 
 /// Copies exactly one message body, re-emitting chunked framing verbatim.
@@ -266,23 +279,20 @@ pub(super) fn parse_response_head(head: &[u8]) -> Option<ResponseHead> {
     })
 }
 
-fn owned_headers(headers: &[httparse::Header]) -> Vec<(String, String)> {
+fn owned_headers(headers: &[httparse::Header]) -> Vec<Header> {
     headers
         .iter()
-        .map(|h| {
-            (
-                h.name.to_string(),
-                String::from_utf8_lossy(h.value).to_string(),
-            )
-        })
+        .map(|h| (h.name.to_string(), h.value.to_vec()))
         .collect()
 }
 
-pub(super) fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+/// The first `name` header's value as text, with bytes that aren't UTF-8
+/// replaced, which no value hush compares against contains.
+pub(super) fn header_value<'a>(headers: &'a [Header], name: &str) -> Option<Cow<'a, str>> {
     headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| String::from_utf8_lossy(v))
 }
 
 pub(super) fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -352,17 +362,17 @@ mod tests {
     #[test]
     fn body_framing_prefers_chunked() {
         let h = vec![
-            ("Content-Length".to_string(), "10".to_string()),
-            ("Transfer-Encoding".to_string(), "gzip, Chunked".to_string()),
+            ("Content-Length".to_string(), b"10".to_vec()),
+            ("Transfer-Encoding".to_string(), b"gzip, Chunked".to_vec()),
         ];
         assert_eq!(body_framing(&h).unwrap(), Body::Chunked);
         assert_eq!(body_framing(&[]).unwrap(), Body::None);
     }
 
     fn framing_of(pairs: &[(&str, &str)]) -> Result<Body> {
-        let h: Vec<(String, String)> = pairs
+        let h: Vec<Header> = pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
             .collect();
         request_framing(&h)
     }

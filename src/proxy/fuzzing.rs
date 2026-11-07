@@ -30,7 +30,9 @@ pub fn request(data: &[u8]) {
         assert!(head.ends_with(b"\r\n\r\n"));
         let Ok(req) = parse_head(&head) else { return };
         let _ = split_host_port(&req.path, 443);
-        if let Ok((host, _, path)) = resolve_target(&req.path, header_value(&req.headers, "host")) {
+        if let Ok((host, _, path)) =
+            resolve_target(&req.path, header_value(&req.headers, "host").as_deref())
+        {
             let _ = names_only(&req.headers, &path, &host);
         }
         let Ok(body) = request_framing(&req.headers) else {

@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 #[cfg(any(test, fuzzing))]
 use super::http::find_double_crlf;
 use super::http::{
-    Body, ResponseHead, chunk_size, connection_has, copy_body, parse_response_head, read_head,
-    read_line, response_framing,
+    Body, Header, ResponseHead, chunk_size, connection_has, copy_body, parse_response_head,
+    read_head, read_line, response_framing,
 };
 use super::scrub::Scrubber;
 #[cfg(any(test, fuzzing))]
@@ -80,13 +80,17 @@ pub(super) fn reusable(resp: &ResponseHead) -> bool {
 }
 
 /// Codings listed in `name`, lowercased, in header order.
-fn header_codings(headers: &[(String, String)], name: &str) -> Vec<String> {
+fn header_codings(headers: &[Header], name: &str) -> Vec<String> {
     headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case(name))
-        .flat_map(|(_, v)| v.split(','))
-        .map(|t| t.trim().to_ascii_lowercase())
-        .filter(|t| !t.is_empty())
+        .flat_map(|(_, v)| {
+            String::from_utf8_lossy(v)
+                .split(',')
+                .map(|t| t.trim().to_ascii_lowercase())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -96,7 +100,7 @@ fn header_codings(headers: &[(String, String)], name: &str) -> Vec<String> {
 /// coding in front of `chunked` — would hide an echoed value. A `chunked`
 /// coding that also carries `Content-Length` is refused separately: the two
 /// headers name different ends of the body.
-fn encodings_scannable(headers: &[(String, String)]) -> bool {
+fn encodings_scannable(headers: &[Header]) -> bool {
     let content = header_codings(headers, "content-encoding");
     if content.iter().any(|t| t != "identity") {
         return false;
@@ -105,7 +109,7 @@ fn encodings_scannable(headers: &[(String, String)]) -> bool {
     transfer.is_empty() || (transfer.len() == 1 && transfer[0] == "chunked")
 }
 
-fn has_content_length(headers: &[(String, String)]) -> bool {
+fn has_content_length(headers: &[Header]) -> bool {
     headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
@@ -116,7 +120,7 @@ fn has_content_length(headers: &[(String, String)]) -> bool {
 /// Chunked framing together with `Content-Length` is refused: re-chunking
 /// would forward a head whose length no longer matches the body, and a client
 /// can honor either header.
-fn unscannable_body(body: Body, headers: &[(String, String)]) -> bool {
+fn unscannable_body(body: Body, headers: &[Header]) -> bool {
     if body == Body::Chunked && has_content_length(headers) {
         return true;
     }
@@ -129,7 +133,7 @@ fn unscannable_body(body: Body, headers: &[(String, String)]) -> bool {
 /// Why a body was refused, using only words hush chose. A coding token is
 /// repeated only when it is one of `KNOWN_CODINGS`; every other token,
 /// including a secret written into the header, is `unrecognized`.
-fn refusal_reason(body: Body, headers: &[(String, String)]) -> String {
+fn refusal_reason(body: Body, headers: &[Header]) -> String {
     if body == Body::Chunked && has_content_length(headers) {
         return "both Content-Length and Transfer-Encoding".to_string();
     }
