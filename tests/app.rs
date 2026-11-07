@@ -76,7 +76,11 @@ impl Home {
     /// The launcher's script, in an environment like launchd's: no terminal,
     /// `/` as the working directory, and only a basic `PATH`.
     fn launch(&self, name: &str) -> Output {
-        let script = self.launcher(name).join("Contents/MacOS/hush-launcher");
+        self.launch_bundle(&self.launcher(name))
+    }
+
+    fn launch_bundle(&self, launcher: &Path) -> Output {
+        let script = launcher.join("Contents/MacOS/hush-launcher");
         Command::new(script)
             .current_dir("/")
             .env_clear()
@@ -225,6 +229,97 @@ fn an_electron_app_gets_a_profile_directory_of_its_own() {
         fs::read_to_string(&report).unwrap(),
         format!("arg={mine}\n")
     );
+}
+
+#[test]
+fn named_launchers_of_one_app_run_side_by_side_with_their_own_keys() {
+    let home = Home::with_key("named");
+    for (profile, value) in [("keys-a", "sk-a-0123456789"), ("keys-b", "sk-b-0123456789")] {
+        let mut add = home.hush(&[
+            "secret",
+            "add",
+            "DEMO_KEY",
+            "--host",
+            "api.example.com",
+            "--profile",
+            profile,
+        ]);
+        add.env("HUSH_SECRET_VALUE", value);
+        assert_ok(add.output().unwrap());
+    }
+    let report = home.0.join("report");
+    let app = home.fake_app(
+        "Fake",
+        &format!(
+            "#!/bin/sh
+for a; do echo \"arg=$a\"; done >>'{}'\n",
+            report.display()
+        ),
+    );
+    fs::create_dir_all(app.join("Contents/Frameworks/Electron Framework.framework")).unwrap();
+    let app = app.to_str().unwrap();
+
+    let add = |extra: &[&str]| {
+        let mut args = vec!["app", "add", app, "--secret", "DEMO_KEY"];
+        args.extend_from_slice(extra);
+        home.hush(&args).output().unwrap()
+    };
+    assert_ok(add(&[]));
+    assert_ok(add(&["--name", "keys-a", "--profile", "keys-a"]));
+    assert_ok(add(&["--name", "keys-b", "--profile", "keys-b"]));
+    // A second launcher of one name still needs --force.
+    let out = add(&["--name", "keys-a"]);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--force"),
+        "{out:?}"
+    );
+    let out = add(&["--name", "hush"]);
+    assert!(!out.status.success(), "{out:?}");
+
+    let apps = home.0.join("Applications");
+    let support = home.0.join("Library/Application Support/hush");
+    let mut ids = Vec::new();
+    for (title, key, profile) in [
+        ("Fake (hush)", "Fake", None),
+        ("Fake (keys-a)", "Fake (keys-a)", Some("keys-a")),
+        ("Fake (keys-b)", "Fake (keys-b)", Some("keys-b")),
+    ] {
+        let bundle = apps.join(format!("{title}.app"));
+        let script = fs::read_to_string(bundle.join("Contents/MacOS/hush-launcher")).unwrap();
+        match profile {
+            Some(p) => assert!(script.contains(&format!("--profile '{p}'")), "{script}"),
+            None => assert!(!script.contains("--profile"), "{script}"),
+        }
+        let plist = fs::read_to_string(bundle.join("Contents/Info.plist")).unwrap();
+        assert!(
+            plist.contains(&format!("<string>{title}</string>")),
+            "{plist}"
+        );
+        ids.push(
+            plist
+                .lines()
+                .find(|l| l.contains("hush.launcher."))
+                .unwrap()
+                .to_string(),
+        );
+
+        fs::write(&report, "").unwrap();
+        let out = home.launch_bundle(&bundle);
+        assert!(out.status.success(), "{out:?}\n{}", home.log(key));
+        let dir = support.join(key);
+        assert_eq!(
+            fs::read_to_string(&report).unwrap(),
+            format!("arg=--user-data-dir\narg={}\n", dir.display())
+        );
+        assert_eq!(
+            fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    ids.sort();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "{ids:?}");
 }
 
 #[test]

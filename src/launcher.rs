@@ -30,9 +30,63 @@ pub struct RunArgs<'a> {
     pub args: &'a [String],
 }
 
+/// What a launcher is called: `APP (hush)`, or `APP (LABEL)` with `--name`,
+/// so one app can have several, each with its own key set.
+struct Launcher<'a> {
+    app: &'a str,
+    label: Option<&'a str>,
+}
+
+impl Launcher<'_> {
+    /// The bundle's name, without `.app`.
+    fn title(&self) -> String {
+        format!("{} ({})", self.app, self.label.unwrap_or("hush"))
+    }
+
+    /// What sets this launcher apart from the app's others: its bundle id,
+    /// log and profile directory. The unnamed one keeps the app's name, as
+    /// launchers written before `--name` did, so replacing one changes none
+    /// of those.
+    fn key(&self) -> String {
+        match self.label {
+            None => self.app.to_string(),
+            Some(_) => self.title(),
+        }
+    }
+}
+
+/// A `--name` becomes part of a file name in `~/Applications` and of the
+/// launcher's directories.
+fn check_label(label: &str) -> Result<()> {
+    if label == "hush" {
+        bail!("--name hush is the launcher without --name; leave it out");
+    }
+    if label.is_empty()
+        || label.len() > 64
+        || label.starts_with('.')
+        || label.contains(['/', ':'])
+        || label.chars().any(char::is_control)
+    {
+        bail!(
+            "--name {label:?} can't be used: it names a file, so it must be 1 to 64 bytes \
+             with no '/', ':' or control character, not starting with '.'"
+        );
+    }
+    Ok(())
+}
+
 /// Writes the launcher for `app_name` (a name in an Applications folder, or
-/// the path of a bundle) and returns where it went.
-pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<PathBuf> {
+/// the path of a bundle), called `label` if given, and returns where it went.
+pub fn add(
+    app_name: &str,
+    label: Option<&str>,
+    run: &RunArgs,
+    force: bool,
+    home: &Path,
+) -> Result<PathBuf> {
+    if let Some(label) = label {
+        check_label(label)?;
+    }
     // The launcher's working directory is `/`.
     if let Some(dir) = app::user_data_dir(run.args)
         && !Path::new(dir).is_absolute()
@@ -52,8 +106,10 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
     }
 
     let name = app::name(&bundle);
+    let launcher = Launcher { app: &name, label };
+    let title = launcher.title();
     let folder = home.join("Applications");
-    let dest = folder.join(format!("{name} (hush).app"));
+    let dest = folder.join(format!("{title}.app"));
     if dest.exists() {
         if !is_launcher(&dest) {
             bail!(
@@ -66,18 +122,17 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
         }
     }
 
-    let args = with_own_profile(&bundle, &name, run.args, home)?;
+    let args = with_own_profile(&bundle, &launcher, run.args, home)?;
     let run = &RunArgs {
         args: &args,
         ..*run
     };
 
     // Built beside the destination, so a failure leaves any old one in place.
-    let tmp = folder.join(format!(".{name} (hush).app.tmp"));
+    let tmp = folder.join(format!(".{title}.app.tmp"));
     let _ = fs::remove_dir_all(&tmp);
-    let written = write_bundle(&tmp, &name, &bundle, &binary, run).and_then(|()| {
-        replace_bundle(&tmp, &dest, &folder.join(format!(".{name} (hush).app.old")))
-    });
+    let written = write_bundle(&tmp, &launcher, &bundle, &binary, run)
+        .and_then(|()| replace_bundle(&tmp, &dest, &folder.join(format!(".{title}.app.old"))));
     if written.is_err() {
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -89,17 +144,21 @@ pub fn add(app_name: &str, run: &RunArgs, force: bool, home: &Path) -> Result<Pa
 /// none for. Such an app hands a second launch with the same directory to
 /// the instance already running, which has none of the run's placeholders
 /// or proxy, so a launcher's app gets a directory of its own and runs beside
-/// the usual one. Another app may not know the option.
+/// the usual one, and beside the app's other launchers. Another app may not
+/// know the option.
 fn with_own_profile(
     bundle: &Path,
-    name: &str,
+    launcher: &Launcher,
     args: &[String],
     home: &Path,
 ) -> Result<Vec<String>> {
     if app::user_data_dir(args).is_some() || !app::is_electron(bundle) {
         return Ok(args.to_vec());
     }
-    let dir = home.join("Library/Application Support/hush").join(name);
+    let name = launcher.app;
+    let dir = home
+        .join("Library/Application Support/hush")
+        .join(launcher.key());
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -147,16 +206,22 @@ fn icon_file(bundle: &Path) -> Option<String> {
 }
 
 /// The launcher's files, in `tmp`.
-fn write_bundle(tmp: &Path, name: &str, bundle: &Path, binary: &Path, run: &RunArgs) -> Result<()> {
+fn write_bundle(
+    tmp: &Path,
+    launcher: &Launcher,
+    bundle: &Path,
+    binary: &Path,
+    run: &RunArgs,
+) -> Result<()> {
     let icon = icon_file(bundle);
     fs::create_dir_all(tmp.join("Contents/MacOS"))?;
     fs::write(
         tmp.join("Contents/Info.plist"),
-        info_plist(name, icon.as_deref()),
+        info_plist(launcher, icon.as_deref()),
     )?;
     let script_path = tmp.join("Contents/MacOS").join(EXECUTABLE);
     let hush = std::env::current_exe()?;
-    fs::write(&script_path, script(name, &hush, binary, run))?;
+    fs::write(&script_path, script(&launcher.key(), &hush, binary, run))?;
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755))?;
     if let Some(icon) = &icon {
         fs::create_dir_all(tmp.join("Contents/Resources"))?;
@@ -232,15 +297,16 @@ fn stable_hash(name: &str) -> u32 {
 
 /// `LSUIElement` keeps the launcher out of the Dock: it never checks in as an
 /// app, so its icon would bounce beside the real app's.
-fn info_plist(name: &str, icon: Option<&str>) -> String {
+fn info_plist(launcher: &Launcher, icon: Option<&str>) -> String {
+    let name = launcher.key();
     let slug: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
     // Names can share a slug, and LaunchServices treats bundles with one id
     // as one app.
-    let hash = stable_hash(name);
-    let title = xml_escape(&format!("{name} (hush)"));
+    let hash = stable_hash(&name);
+    let title = xml_escape(&launcher.title());
     let icon = icon.map_or(String::new(), |icon| {
         format!(
             "  <key>CFBundleIconFile</key><string>{}</string>\n",
@@ -273,6 +339,7 @@ fn xml_escape(s: &str) -> String {
 /// The launcher itself. Everything that came from outside is single-quoted,
 /// and what the alert shows is passed as an argument, never as AppleScript.
 /// It waits for the run rather than `exec`ing it, to report how it ended.
+/// `name` is the launcher's key: its log and alert title.
 fn script(name: &str, hush: &Path, binary: &Path, run: &RunArgs) -> String {
     let mut command = vec!["\"$hush\"".to_string(), "run".to_string()];
     for secret in run.secrets {
@@ -357,7 +424,11 @@ mod tests {
 
     #[test]
     fn the_plist_is_escaped_and_stays_out_of_the_dock() {
-        let text = info_plist("R&D <x>", Some("a.icns"));
+        let launcher = Launcher {
+            app: "R&D <x>",
+            label: None,
+        };
+        let text = info_plist(&launcher, Some("a.icns"));
         assert!(
             text.contains("<string>R&amp;D &lt;x&gt; (hush)</string>"),
             "{text}"
@@ -369,8 +440,15 @@ mod tests {
 
     #[test]
     fn names_with_one_slug_get_different_ids() {
-        let id = |name| info_plist(name, None);
-        assert_ne!(id("R&D"), id("R D"));
+        let id = |app, label| info_plist(&Launcher { app, label }, None);
+        assert_ne!(id("R&D", None), id("R D", None));
+        assert_ne!(id("Code", None), id("Code", Some("work")));
+        // A launcher without --name keeps the id it had before --name.
+        assert!(
+            id("a", None).contains(&format!("hush.launcher.a-{:08x}<", stable_hash("a"))),
+            "{}",
+            id("a", None)
+        );
         assert_eq!(stable_hash("Cursor"), stable_hash("Cursor"));
         // Pinned: a launcher's id must not change between builds.
         assert_eq!(stable_hash("a"), 0xe40c_292c);
@@ -385,7 +463,7 @@ mod tests {
             env: None,
             args: &args,
         };
-        let err = add("Nothing", &run, false, Path::new("/nonexistent")).unwrap_err();
+        let err = add("Nothing", None, &run, false, Path::new("/nonexistent")).unwrap_err();
         assert!(err.to_string().contains("absolute"), "{err}");
     }
 
@@ -397,7 +475,17 @@ mod tests {
             env: None,
             args: &[],
         };
-        let err = add("No Such App", &run, false, Path::new("/nonexistent")).unwrap_err();
+        let err = add("No Such App", None, &run, false, Path::new("/nonexistent")).unwrap_err();
         assert!(err.to_string().contains("/Applications"), "{err}");
+    }
+
+    #[test]
+    fn a_name_must_be_usable_in_a_file_name() {
+        for bad in ["", "hush", ".hidden", "a/b", "a:b", "a\nb", &"x".repeat(65)] {
+            assert!(check_label(bad).is_err(), "{bad:?}");
+        }
+        for good in ["work", "keys-a", "Client X", "été"] {
+            check_label(good).unwrap();
+        }
     }
 }

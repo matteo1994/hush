@@ -73,8 +73,9 @@ created_at = "2026-10-25T23:31:02.712649Z"
 id = "several-launchers-for-one-app-each-with-its-own-name-and-key-set"
 title = "Several launchers for one app, each with its own name and key set"
 notes = "hush app add --name LABEL writes 'APP (LABEL).app' with its own --user-data-dir, so e.g. VS Code with profile keys-a and VS Code with keys-b run side by side. Today there is one launcher per app, and every window of an instance shares one environment, so one key set per instance."
-status = "todo"
+status = "done"
 created_at = "2026-11-07T03:31:37.824464Z"
+completed_at = "2026-11-07T17:24:25.093398Z"
 
 [[stones]]
 id = "trust"
