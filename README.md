@@ -225,15 +225,15 @@ The Dock and Spotlight start an app with launchd's environment, so nothing of a 
 
 ```bash
 hush keychain enable     # a launcher has no terminal to ask for the passphrase on
-hush app add "Visual Studio Code" --secret ANTHROPIC_API_KEY -- --user-data-dir ~/.vscode-hush
+hush app add "Visual Studio Code" --secret ANTHROPIC_API_KEY
 ```
 
-That writes `~/Applications/Visual Studio Code (hush).app`, with the app's icon, which Spotlight finds and the Dock can keep. It's a shell script and a plist: it holds the command you would have typed, and no secret. `APP` is a name in `/Applications` or `~/Applications`, or the path of a bundle. Everything after `--` goes to the app, so see *VS Code and its extensions* for the user-data dir and its setting; give an absolute path. `--profile` and `--env` work as in `hush run`. A project's `.env` doesn't apply, as a launcher runs from `/`, so name secrets with `--secret` or `~/.config/hush/global.env`. `--force` replaces the launcher, which you need after moving hush, since it records hush's path. Delete the `.app` to remove it.
+That writes `~/Applications/Visual Studio Code (hush).app`, with the app's icon, which Spotlight finds and the Dock can keep. It's a shell script and a plist: it holds the command you would have typed, and no secret. `APP` is a name in `/Applications` or `~/Applications`, or the path of a bundle. Everything after `--` goes to the app. An Electron app, such as VS Code, Cursor or the Claude desktop app, gets `--user-data-dir ~/Library/Application Support/hush/APP` unless you pass one (an absolute path), because it hands a second launch with the same directory to the instance already running, which has none of the run's placeholders. So the launcher's app runs beside your usual one, with its own settings and sign-ins, which start empty; see *VS Code and its extensions* for the setting it needs. `--profile` and `--env` work as in `hush run`. A project's `.env` doesn't apply, as a launcher runs from `/`, so name secrets with `--secret` or `~/.config/hush/global.env`. `--force` replaces the launcher, which you need after moving hush, since it records hush's path. Delete the `.app` to remove it.
 
 - **Open it from the launcher every time.** The Dock icon of the running app is the app's own: pinned and clicked later, it starts the app without hush. Pin the launcher instead.
 - **Opening the launcher again does nothing while the app runs.** The launcher stays out of the Dock and doesn't bring the app forward, so switch to the app as usual.
 - **Files aren't passed on.** "Open With" the launcher starts the app without the file.
-- **When hush fails, an alert shows why**, such as the app already running without its own user-data dir. An app that exits with an error on its own shows none. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
+- **When hush fails, an alert shows why**, such as the app already running with the same user-data dir. An app that exits with an error on its own shows none. Output from the run and the app goes to `~/Library/Logs/hush/APP.log`, along with hush's warnings, such as a key past its max age. The file holds placeholders, never a real value.
 
 ## Current scope (v0)
 

@@ -150,6 +150,8 @@ fn a_launcher_starts_the_app_under_hush_run_and_holds_no_secret() {
     assert!(report.contains("proxy=http://127.0.0.1:"), "{report}");
     assert!(report.contains("pass=\n"), "{report}");
     assert!(report.contains("arg=--flag\narg=two words\n"), "{report}");
+    // Not an Electron app, so no profile directory of its own.
+    assert!(!report.contains("user-data-dir"), "{report}");
     assert!(!report.contains(REAL), "{report}");
     assert_eq!(home.alerts(), "");
 
@@ -164,6 +166,59 @@ fn a_launcher_starts_the_app_under_hush_run_and_holds_no_secret() {
             .arg(home.launcher("Fake").join("Contents/Info.plist"))
             .output()
             .unwrap(),
+    );
+}
+
+/// An Electron app takes a launch over when it already runs with the same
+/// profile directory, so a launcher gives it one of its own, unless the
+/// arguments name one.
+#[test]
+fn an_electron_app_gets_a_profile_directory_of_its_own() {
+    let home = Home::with_key("electron");
+    let report = home.0.join("report");
+    let app = home.fake_app(
+        "Fake",
+        &format!(
+            "#!/bin/sh\nfor a; do echo \"arg=$a\"; done >'{}'\n",
+            report.display()
+        ),
+    );
+    fs::create_dir_all(app.join("Contents/Frameworks/Electron Framework.framework")).unwrap();
+    let app = app.to_str().unwrap();
+    let dir = home.0.join("Library/Application Support/hush/Fake");
+
+    let out = home
+        .hush(&["app", "add", app, "--secret", "DEMO_KEY", "--", "file"])
+        .output()
+        .unwrap();
+    assert_ok(out.clone());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains(&dir.display().to_string()), "{stderr}");
+    let mode = fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    let out = home.launch("Fake");
+    assert!(out.status.success(), "{out:?}\n{}", home.log("Fake"));
+    let args = fs::read_to_string(&report).unwrap();
+    assert_eq!(
+        args,
+        format!("arg=--user-data-dir\narg={}\narg=file\n", dir.display())
+    );
+
+    let mine = home.0.join("mine");
+    let mine = format!("--user-data-dir={}", mine.display());
+    let out = home
+        .hush(&[
+            "app", "add", app, "--force", "--secret", "DEMO_KEY", "--", &mine,
+        ])
+        .output()
+        .unwrap();
+    assert_ok(out);
+    let out = home.launch("Fake");
+    assert!(out.status.success(), "{out:?}\n{}", home.log("Fake"));
+    assert_eq!(
+        fs::read_to_string(&report).unwrap(),
+        format!("arg={mine}\n")
     );
 }
 
