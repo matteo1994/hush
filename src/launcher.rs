@@ -105,6 +105,12 @@ fn with_own_profile(
         .mode(0o700)
         .create(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
+    // `mode` only covers what this call created; the directory holds the
+    // instance's sign-ins, and either may be left from before.
+    for path in [dir.as_path(), dir.parent().unwrap_or(&dir)] {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting {}", path.display()))?;
+    }
     eprintln!(
         "{name} gets a profile directory of its own, {}, so it runs beside your usual {name}; \
          its settings and sign-ins start empty there (pass --user-data-dir after -- for another)",

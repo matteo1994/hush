@@ -186,6 +186,9 @@ fn an_electron_app_gets_a_profile_directory_of_its_own() {
     fs::create_dir_all(app.join("Contents/Frameworks/Electron Framework.framework")).unwrap();
     let app = app.to_str().unwrap();
     let dir = home.0.join("Library/Application Support/hush/Fake");
+    // Left from before, more open than it should be.
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
 
     let out = home
         .hush(&["app", "add", app, "--secret", "DEMO_KEY", "--", "file"])
@@ -194,8 +197,10 @@ fn an_electron_app_gets_a_profile_directory_of_its_own() {
     assert_ok(out.clone());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains(&dir.display().to_string()), "{stderr}");
-    let mode = fs::metadata(&dir).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o700);
+    for path in [&dir, &home.0.join("Library/Application Support/hush")] {
+        let mode = fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{}", path.display());
+    }
 
     let out = home.launch("Fake");
     assert!(out.status.success(), "{out:?}\n{}", home.log("Fake"));
