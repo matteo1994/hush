@@ -4,6 +4,11 @@ Every merge to master that changes the program is a release. CI adds its entry
 here, from the merged commits' subjects (see
 `.github/scripts/bump-version.sh`).
 
+## 0.2.3 (2026-11-07)
+
+- Open the README with what hush is for and a five-minute quick start. (#63)
+- Let one app have several launchers, each with its own name and keys. (#64)
+
 ## 0.2.2 (2026-11-07)
 
 - Give an Electron app's launcher its own profile directory by default. (#62)
