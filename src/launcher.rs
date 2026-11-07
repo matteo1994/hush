@@ -58,7 +58,9 @@ impl Launcher<'_> {
 /// A `--name` becomes part of a file name in `~/Applications` and of the
 /// launcher's directories.
 fn check_label(label: &str) -> Result<()> {
-    if label == "hush" {
+    // `~/Applications` is usually case-insensitive, so `Hush` would land on
+    // the unnamed launcher's bundle under another key.
+    if label.eq_ignore_ascii_case("hush") {
         bail!("--name hush is the launcher without --name; leave it out");
     }
     if label.is_empty()
@@ -481,7 +483,17 @@ mod tests {
 
     #[test]
     fn a_name_must_be_usable_in_a_file_name() {
-        for bad in ["", "hush", ".hidden", "a/b", "a:b", "a\nb", &"x".repeat(65)] {
+        for bad in [
+            "",
+            "hush",
+            "Hush",
+            "HUSH",
+            ".hidden",
+            "a/b",
+            "a:b",
+            "a\nb",
+            &"x".repeat(65),
+        ] {
             assert!(check_label(bad).is_err(), "{bad:?}");
         }
         for good in ["work", "keys-a", "Client X", "été"] {

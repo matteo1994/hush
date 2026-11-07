@@ -77,6 +77,13 @@ status = "done"
 created_at = "2026-11-07T03:31:37.824464Z"
 completed_at = "2026-11-07T17:24:25.093398Z"
 
+[[stones.steps]]
+id = "two-named-vs-code-launchers-opened-from-spotlight-run-side-by-side-with-their-own-keys"
+title = "Two named VS Code launchers opened from Spotlight run side by side with their own keys"
+notes = "Checked by hand, since CI can't reach LaunchServices: hush app add 'Visual Studio Code' --name a --profile a, and again with b; open both from Spotlight with the usual VS Code open; each integrated terminal shows its own profile's placeholder names, the windows belong to separate instances, and the Dock doesn't merge them."
+status = "todo"
+created_at = "2026-11-07T17:27:08.667123Z"
+
 [[stones]]
 id = "trust"
 title = "trust"

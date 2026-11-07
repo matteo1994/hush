@@ -316,7 +316,8 @@ enum AppAction {
         profile: Option<String>,
         #[arg(long)]
         env: Option<String>,
-        /// Replace the launcher of that name if there is one already.
+        /// Replace the launcher of that name if there is one already. Names
+        /// that differ only in case are usually the same launcher.
         #[arg(long)]
         force: bool,
         /// Arguments for the app, such as `--user-data-dir DIR`.
